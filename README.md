@@ -1,3 +1,4 @@
+---
 title: Giudizi-AI
 emoji: 🤖
 colorFrom: blue
@@ -5,7 +6,7 @@ colorTo: indigo
 sdk: streamlit
 app_file: app.py
 pinned: falseGiudizi-AI
-
+---
 
 Giudizi-AI
 Questa applicazione è stata creata per aiutare gli insegnanti a generare giudizi per le verifiche di matematica e a gestire i propri dati in modo efficiente. L'applicazione sfrutta un modello di linguaggio per generare testi basati sui dati di valutazione inseriti.
@@ -30,3 +31,4 @@ Generazione: Il modello ottimizzato viene utilizzato per generare giudizi person
 
 
 Questo progetto è un esempio di come l'intelligenza artificiale possa essere applicata a compiti specifici per automatizzare processi e supportare il lavoro quotidiano.
+
