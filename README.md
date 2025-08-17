@@ -1,5 +1,4 @@
----
-title: Giudizi-AI
+---title: Giudizi-AI
 emoji: 🤖
 colorFrom: blue
 colorTo: indigo
@@ -27,3 +26,4 @@ L'applicazione si basa su una semplice pipeline:
 4.  Generazione: Il modello ottimizzato viene utilizzato per generare giudizi personalizzati.
 
 Questo progetto è un esempio di come l'intelligenza artificiale possa essere applicata a compiti specifici per automatizzare processi e supportare il lavoro quotidiano.
+
