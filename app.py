@@ -136,13 +136,13 @@ with st.expander("Carica un file da completare e avvia la generazione"):
     )
 
     if uploaded_file_to_complete:
-        file_data = {
-            "name": uploaded_file_to_complete.name,
-            "data": uploaded_file_to_complete.getvalue()
-        }
-        
-        # Identifica i fogli di lavoro e la colonna 'Giudizio'
         try:
+            file_data = {
+                "name": uploaded_file_to_complete.name,
+                "data": uploaded_file_to_complete.getvalue()
+            }
+            
+            # Identifica i fogli di lavoro e la colonna 'Giudizio'
             excel_file = pd.ExcelFile(BytesIO(file_data["data"]))
             sheet_names = excel_file.sheet_names
             
@@ -194,6 +194,9 @@ with st.expander("Carica un file da completare e avvia la generazione"):
                         st.error(f"Errore durante l'operazione: {e}\n\nTraceback:\n{traceback.format_exc()}")
                 else:
                     st.warning("Per avviare la generazione, devi prima completare l'addestramento del modello.")
+
+        except Exception as e:
+            st.error(f"Errore nel caricamento del file Excel: {e}\n\nTraceback:\n{traceback.format_exc()}")
 
 
 # SEZIONE 4: VISUALIZZAZIONE RISULTATI E DOWNLOAD
