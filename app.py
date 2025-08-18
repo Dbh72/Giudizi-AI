@@ -35,8 +35,6 @@ if 'corpus' not in st.session_state:
     st.session_state.corpus = pd.DataFrame()
 if 'uploaded_files_data' not in st.session_state:
     st.session_state.uploaded_files_data = {}
-if 'last_action_status' not in st.session_state:
-    st.session_state.last_action_status = ""
 
 # ==============================================================================
 # SEZIONE 3: FUNZIONI PER LA GESTIONE DEI FILE
@@ -62,10 +60,6 @@ def save_uploaded_file(uploaded_file):
 st.title("Generatore di Giudizi con IA")
 st.markdown("---")
 
-# Visualizzazione dello stato corrente dell'applicazione.
-if st.session_state.last_action_status:
-    st.info(st.session_state.last_action_status)
-
 # ==============================================================================
 # SOTTO-SEZIONE: CARICAMENTO E PREPARAZIONE DEL CORPUS
 # ==============================================================================
@@ -86,31 +80,37 @@ if uploaded_files:
     # Processa tutti i file memorizzati
     corpus_list = []
     
-    with st.spinner("Elaborazione dei file..."):
-        for file_name, file_data in st.session_state.uploaded_files_data.items():
-            # Salva il file per il modulo 'excel_reader'
-            temp_file_path = save_uploaded_file(file_data)
-            if temp_file_path:
-                # Utilizza il modulo load_and_prepare_excel per elaborare il file
-                df_new = load_and_prepare_excel(temp_file_path)
+    # Usa st.status per mostrare lo stato di avanzamento in tempo reale
+    with st.status("Elaborazione dei file...", expanded=True) as status:
+        try:
+            for file_name, file_data in st.session_state.uploaded_files_data.items():
+                status.write(f"Elaborazione del file '{file_name}'...")
                 
-                if not df_new.empty:
-                    corpus_list.append(df_new)
-                    st.session_state.last_action_status = f"File '{file_name}' elaborato con successo."
-                else:
-                    st.session_state.last_action_status = f"Impossibile elaborare il contenuto di '{file_name}' o non contiene dati validi."
-                
-                # Rimuovi il file temporaneo
-                os.remove(temp_file_path)
+                temp_file_path = save_uploaded_file(file_data)
+                if temp_file_path:
+                    df_new = load_and_prepare_excel(temp_file_path)
+                    
+                    if not df_new.empty:
+                        corpus_list.append(df_new)
+                        status.write(f"File '{file_name}' elaborato con successo. Righe aggiunte: {len(df_new)}")
+                    else:
+                        status.write(f"ATTENZIONE: Il file '{file_name}' non contiene dati validi. Saltato.")
+                    
+                    # Rimuovi il file temporaneo
+                    os.remove(temp_file_path)
 
-    # Concatena tutti i DataFrame elaborati in un unico corpus
-    if corpus_list:
-        st.session_state.corpus = pd.concat(corpus_list, ignore_index=True)
-        st.success("Tutti i file sono stati elaborati e il corpus è aggiornato.")
-    else:
-        st.session_state.corpus = pd.DataFrame()
-        st.info("Nessun dato valido trovato nei file caricati.")
+            if corpus_list:
+                st.session_state.corpus = pd.concat(corpus_list, ignore_index=True)
+                total_rows = len(st.session_state.corpus)
+                status.update(label=f"Corpus creato con {total_rows} righe. Operazione completata!", state="complete", expanded=False)
+            else:
+                st.session_state.corpus = pd.DataFrame()
+                status.update(label="Nessun dato valido trovato nei file caricati.", state="error", expanded=True)
 
+        except Exception as e:
+            status.update(label=f"Errore durante l'elaborazione: {e}", state="error", expanded=True)
+            st.error(f"Si è verificato un errore: {e}\n\nTraceback:\n{traceback.format_exc()}")
+            
 
 # ==============================================================================
 # SOTTO-SEZIONE: VISUALIZZAZIONE E DOWNLOAD DEL CORPUS TOTALE
