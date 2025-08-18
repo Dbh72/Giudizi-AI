@@ -5,6 +5,7 @@
 # ==============================================================================
 import pandas as pd
 import openpyxl
+import os
 import re
 
 # ==============================================================================
@@ -38,72 +39,71 @@ def find_header_row(file_path, sheet_name):
         sheet_name (str): Il nome del foglio di lavoro.
 
     Returns:
-        int: L'indice della riga dell'intestazione (0-based) o None se non trovata.
+        int: L'indice di riga dell'intestazione o None se non trovata.
     """
     try:
-        workbook = openpyxl.load_workbook(file_path, read_only=True)
+        workbook = openpyxl.load_workbook(file_path)
         sheet = workbook[sheet_name]
         
-        # Scansiona le prime 10 righe per l'intestazione
-        for row_idx, row in enumerate(sheet.iter_rows(min_row=1, max_row=10, values_only=True)):
-            if 'giudizio' in [str(cell).strip().lower() for cell in row if cell is not None]:
-                return row_idx
+        # Scansiona le prime 10 righe per trovare 'Giudizio'.
+        for row_idx in range(1, 11):
+            for col_idx in range(1, sheet.max_column + 1):
+                cell_value = str(sheet.cell(row=row_idx, column=col_idx).value).strip()
+                if re.search(r'giudizio', cell_value, re.IGNORECASE):
+                    return row_idx - 1 # Ritorniamo l'indice di riga (0-based)
+        return None
     except Exception as e:
-        print(f"Errore nella ricerca dell'intestazione: {e}")
-    return None
+        print(f"Errore nella ricerca dell'intestazione del file: {e}")
+        return None
 
 
 def load_and_prepare_excel(file_path):
     """
-    Legge un file Excel, identifica i fogli e la colonna 'Giudizio' e prepara
-    un DataFrame per il fine-tuning.
+    Carica un file Excel, identifica le colonne e i dati rilevanti,
+    e restituisce un DataFrame di pandas per il fine-tuning.
 
     Args:
-        file_path (str): Il percorso del file Excel.
+        file_path (str): Il percorso del file Excel da elaborare.
 
     Returns:
-        pd.DataFrame: Un DataFrame unificato con le colonne 'input_text' e 'target_text'.
+        pd.DataFrame: Un DataFrame contenente le colonne 'input_text' e
+                      'target_text' per il fine-tuning, o un DataFrame vuoto
+                      in caso di errore.
     """
-    corpus_list = []
-    
     try:
-        # Usa openpyxl per ottenere tutti i nomi dei fogli
         workbook = openpyxl.load_workbook(file_path, read_only=True)
-        all_sheet_names = workbook.sheetnames
-
-        # Filtra i fogli che contengono dati validi
-        relevant_sheets = [s for s in all_sheet_names if s not in ['Medie', 'Prototipo', 'copertina']]
+        all_sheets = workbook.sheetnames
+        corpus_list = []
         
-        # Se non ci sono fogli validi, restituisci un DataFrame vuoto
-        if not relevant_sheets:
-            print("Nessun foglio valido trovato.")
-            return pd.DataFrame()
-
-        for sheet_name in relevant_sheets:
-            print(f"Elaborazione del foglio '{sheet_name}'...")
+        for sheet_name in all_sheets:
+            # Ignoriamo i fogli non pertinenti (es. 'copertina').
+            if "copertina" in sheet_name.lower():
+                print(f"Attenzione: Foglio '{sheet_name}' ignorato.")
+                continue
             
-            # Trova la riga dell'intestazione.
+            # Troviamo la riga di intestazione
             header_row_index = find_header_row(file_path, sheet_name)
-            
             if header_row_index is None:
-                print(f"Attenzione: Impossibile trovare la riga dell'intestazione nel foglio '{sheet_name}'. Saltato.")
+                print(f"Attenzione: Riga di intestazione con 'Giudizio' non trovata nel foglio '{sheet_name}'. Saltato.")
                 continue
 
-            # Legge il foglio di lavoro nel DataFrame, saltando le righe prima dell'intestazione.
+            # Carichiamo il foglio come DataFrame, usando l'intestazione trovata
             df_sheet = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row_index)
-            
-            # Pulisce le righe e le colonne vuote
-            df_sheet.dropna(how='all', inplace=True)
-            df_sheet.dropna(axis=1, how='all', inplace=True)
 
-            # Trova la colonna 'Giudizio'
+            # Troviamo la colonna 'Giudizio' nel DataFrame del foglio
             giudizio_col = find_giudizio_column(df_sheet)
-            
-            if not giudizio_col:
-                print(f"Attenzione: La colonna 'Giudizio' non è stata trovata nel foglio '{sheet_name}'. Saltato.")
+            if giudizio_col is None:
+                print(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet_name}'. Saltato.")
                 continue
-                
-            # Identifica le altre colonne che devono essere usate per il prompt
+            
+            # Filtriamo le righe che contengono dati non validi nella colonna 'Giudizio'
+            df_sheet = df_sheet.dropna(subset=[giudizio_col])
+            
+            # Togliamo le colonne con solo valori NaN o una sola riga
+            df_sheet = df_sheet.dropna(axis=1, how='all')
+            df_sheet = df_sheet.dropna(axis=0, how='all')
+            
+            # Troviamo tutte le altre colonne
             other_cols = [col for col in df_sheet.columns if col != giudizio_col]
             
             # Prepara la lista di dizionari per la creazione del dataset
@@ -139,5 +139,7 @@ def load_and_prepare_excel(file_path):
         
     except Exception as e:
         print(f"Errore nella lettura del file '{os.path.basename(file_path)}': {e}")
+        traceback_str = traceback.format_exc()
+        print(traceback_str)
         return pd.DataFrame()
 
