@@ -13,7 +13,7 @@ from io import BytesIO
 import traceback
 import openpyxl
 import warnings
-from datetime import datetime # HO AGGIUNTO QUESTA LINEA!
+from datetime import datetime
 
 # Importiamo i moduli con la logica per la preparazione dei dati, l'addestramento e la generazione.
 from excel_reader import load_and_prepare_excel, find_giudizio_column
@@ -91,7 +91,8 @@ with tab1:
                 for uploaded_file in uploaded_files:
                     add_status_message(f"Lettura del file '{uploaded_file.name}'...")
                     file_data = BytesIO(uploaded_file.getvalue())
-                    df = load_and_prepare_excel(file_data)
+                    # Corretto: Aggiunge 'uploaded_file.name' come secondo argomento
+                    df = load_and_prepare_excel(file_data, uploaded_file.name)
                     
                     if not df.empty:
                         all_corpus_list.append(df)
