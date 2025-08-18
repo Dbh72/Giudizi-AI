@@ -1,233 +1,209 @@
-# app.py - Orchestratore principale per la creazione del Corpus
+# app.py - Orchestratore principale con funzionalità unificate
 
 # ==============================================================================
 # SEZIONE 1: LIBRERIE NECESSARIE
 # ==============================================================================
-# Importa le librerie essenziali per l'applicazione.
+# Importiamo tutte le librerie essenziali per l'applicazione.
 # streamlit per la creazione dell'interfaccia utente web.
 # pandas per la manipolazione dei dati in formato DataFrame.
+# os per la gestione del file system (creazione di directory, percorsi).
+# io.BytesIO per gestire i file in memoria senza scriverli su disco.
 # openpyxl per la lettura e scrittura di file Excel.
-# re per le espressioni regolari per trovare la colonna 'Giudizio'.
-# io.BytesIO per gestire i file in memoria.
+# traceback per la gestione degli errori.
 import streamlit as st
 import pandas as pd
-import openpyxl
-import re
+import os
 from io import BytesIO
 import traceback
+import openpyxl
+
+# Importiamo i moduli con la logica per la preparazione dei dati
+# Assicurati di avere un file 'excel_reader.py' nella stessa directory.
+from excel_reader import load_and_prepare_excel
 
 # ==============================================================================
 # SEZIONE 2: CONFIGURAZIONE DELLA PAGINA E GESTIONE DELLO STATO
 # ==============================================================================
 
-# Imposta il titolo della pagina e l'icona per l'app Streamlit.
+# Impostiamo il titolo della pagina e l'icona per l'app Streamlit.
 st.set_page_config(
-    page_title="Costruttore di Corpus",
-    page_icon="📚",
+    page_title="Generatore di Giudizi con IA",
+    page_icon="🤖",
     layout="wide"
 )
 
-# Inizializza le variabili di stato della sessione per mantenere i dati tra le interazioni.
+# Inizializziamo le variabili di stato della sessione per mantenere i dati tra le interazioni.
 if 'corpus' not in st.session_state:
     st.session_state.corpus = pd.DataFrame()
-if 'uploaded_files_data' not in st.session_state:
-    st.session_state.uploaded_files_data = {}
+if 'file_to_process_corpus' not in st.session_state:
+    st.session_state.file_to_process_corpus = pd.DataFrame()
+if 'generation_status' not in st.session_state:
+    st.session_state.generation_status = None
+if 'process_completed_file' not in st.session_state:
+    st.session_state.process_completed_file = None
+if 'last_action_status' not in st.session_state:
+    st.session_state.last_action_status = ""
+if 'fine_tuning_state' not in st.session_state:
+    st.session_state.fine_tuning_state = "ready"
+if 'download_file_path' not in st.session_state:
+    st.session_state.download_file_path = None
+if 'fine_tune_file_input' not in st.session_state:
+    st.session_state.fine_tune_file_input = None
 
 # ==============================================================================
-# SEZIONE 3: FUNZIONI PER LA PREPARAZIONE DEI DATI DA FILE EXCEL
+# SEZIONE 3: GESTIONE DEL CARICAMENTO DEI FILE
 # ==============================================================================
 
-def find_giudizio_column(df):
-    """
-    Trova la colonna 'Giudizio' nel DataFrame, cercando in modo case-insensitive
-    in tutte le intestazioni.
-
-    Args:
-        df (pd.DataFrame): Il DataFrame del foglio da analizzare.
-
-    Returns:
-        str: Il nome della colonna 'Giudizio' o None se non trovata.
-    """
-    # Cerca la parola 'giudizio' in modo case-insensitive tra le colonne.
-    for col in df.columns:
-        if isinstance(col, str) and re.search(r'giudizio', str(col), re.IGNORECASE):
-            return col
-    return None
-
-def find_header_row(file_content, sheet_name):
-    """
-    Scansiona le prime righe di un foglio di lavoro per identificare la riga
-    dell'intestazione che contiene la colonna 'Giudizio'.
-
-    Args:
-        file_content (BytesIO): Il contenuto del file Excel in memoria.
-        sheet_name (str): Il nome del foglio di lavoro.
-
-    Returns:
-        int: L'indice della riga dell'intestazione (0-based) o None se non trovata.
-    """
-    # Prova a leggere le prime 50 righe per trovare l'intestazione
-    for header_row in range(50):
-        try:
-            # Usiamo BytesIO per passare il contenuto in memoria a pandas
-            df_check = pd.read_excel(file_content, sheet_name=sheet_name, header=header_row)
-            if find_giudizio_column(df_check):
-                return header_row
-        except Exception:
-            file_content.seek(0)
-            continue
-    return None
-
-def load_and_prepare_excel(file_content):
-    """
-    Carica un file Excel da un buffer di memoria, prepara i dati per il fine-tuning
-    e li restituisce come un DataFrame di Pandas.
-    
-    Args:
-        file_content (BytesIO): Il contenuto del file Excel in memoria.
-
-    Returns:
-        pd.DataFrame: Un DataFrame di Pandas con le colonne 'input_text' e 'target_text'.
-    """
+def save_uploaded_file(uploaded_file):
+    """Salva il file caricato dall'utente in una directory temporanea."""
     try:
-        corpus_list = []
-        # Usa openpyxl per ottenere i nomi dei fogli
-        workbook = openpyxl.load_workbook(file_content, read_only=True)
-        sheet_names = workbook.sheetnames
-        file_content.seek(0) # Riavvolgi il buffer dopo la lettura
-        
-        for sheet_name in sheet_names:
-            # Salta i fogli che non ci interessano
-            if sheet_name.lower().startswith(('copertina', 'copia')):
-                continue
-
-            # Trova la riga dell'intestazione in modo dinamico
-            header_row_index = find_header_row(file_content, sheet_name)
-            file_content.seek(0) # Riavvolgi il buffer
-            
-            if header_row_index is None:
-                continue
-
-            # Legge il foglio con l'intestazione corretta
-            df_sheet = pd.read_excel(file_content, sheet_name=sheet_name, header=header_row_index)
-            file_content.seek(0) # Riavvolgi il buffer
-
-            giudizio_col = find_giudizio_column(df_sheet)
-            if not giudizio_col:
-                continue
-
-            # Rimuove le righe vuote e le colonne che non sono utili
-            df_sheet = df_sheet.dropna(how='all', subset=[col for col in df_sheet.columns if df_sheet[col].notna().any()])
-            other_cols = [col for col in df_sheet.columns if col != giudizio_col and 'Unnamed' not in str(col)]
-
-            # Prepara la lista di dizionari per la creazione del dataset
-            data_for_dataset = []
-            for index, row in df_sheet.iterrows():
-                prompt_parts = []
-                for col in other_cols:
-                    value = row.get(col)
-                    if pd.notna(value) and str(value).strip():
-                        prompt_parts.append(f"{col}: {str(value).strip()}")
-                
-                prompt_text = " ".join(prompt_parts)
-                target_text = str(row[giudizio_col]).strip() if pd.notna(row[giudizio_col]) else ""
-
-                if prompt_text and target_text:
-                    data_for_dataset.append({
-                        'input_text': prompt_text,
-                        'target_text': target_text
-                    })
-            
-            if data_for_dataset:
-                corpus_list.extend(data_for_dataset)
-        
-        if not corpus_list:
-            return pd.DataFrame()
-            
-        return pd.DataFrame(corpus_list)
-        
+        os.makedirs("temp_uploads", exist_ok=True)
+        file_path = os.path.join("temp_uploads", uploaded_file.name)
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        return file_path
     except Exception as e:
-        st.error(f"Errore nella lettura del file: {e}")
-        st.error(f"Traceback:\n{traceback.format_exc()}")
-        return pd.DataFrame()
+        st.error(f"Errore nel salvataggio del file: {e}")
+        return None
 
 # ==============================================================================
-# SEZIONE 4: INTERFACCIA UTENTE (UI) E LOGICA PRINCIPALE
+# SEZIONE 4: INTERFACCIA UTENTE
 # ==============================================================================
 
-st.title("Costruttore di Corpus AI")
+st.title("Generatore di Giudizi con IA")
 st.markdown("---")
 
-# ==============================================================================
-# SOTTO-SEZIONE: CARICAMENTO E PREPARAZIONE DEL CORPUS
-# ==============================================================================
-st.write("### Carica i File per il Corpus di Fine-Tuning")
-st.write("Carica uno o più file Excel per costruire il corpus. I file devono contenere la colonna 'Giudizio'. Se ricarichi un file già presente, verrà aggiornato.")
-
-uploaded_files = st.file_uploader(
-    "Trascina e rilascia i file qui",
-    type=["xlsx", "xls", "xlsm"],
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    # Aggiorna lo stato della sessione con i nuovi file
-    for file in uploaded_files:
-        st.session_state.uploaded_files_data[file.name] = file
-    
-    # Processa tutti i file memorizzati
-    corpus_list = []
-    
-    with st.status("Elaborazione dei file...", expanded=True) as status:
-        try:
-            for file_name, file_data in st.session_state.uploaded_files_data.items():
-                status.write(f"Elaborazione del file '{file_name}'...")
-                
-                # Legge il contenuto del file in un buffer di memoria
-                file_buffer = BytesIO(file_data.getvalue())
-                
-                df_new = load_and_prepare_excel(file_buffer)
-                
-                if not df_new.empty:
-                    corpus_list.append(df_new)
-                    status.write(f"File '{file_name}' elaborato con successo. Righe aggiunte: {len(df_new)}")
-                else:
-                    status.write(f"ATTENZIONE: Il file '{file_name}' non contiene dati validi. Saltato.")
-
-            if corpus_list:
-                st.session_state.corpus = pd.concat(corpus_list, ignore_index=True)
-                total_rows = len(st.session_state.corpus)
-                status.update(label=f"Corpus creato con {total_rows} righe. Operazione completata!", state="complete", expanded=False)
-            else:
-                st.session_state.corpus = pd.DataFrame()
-                status.update(label="Nessun dato valido trovato nei file caricati.", state="error", expanded=True)
-
-        except Exception as e:
-            status.update(label=f"Errore durante l'elaborazione: {e}", state="error", expanded=True)
-            st.error(f"Si è verificato un errore: {e}\n\nTraceback:\n{traceback.format_exc()}")
-            
+# Crea una barra laterale per le opzioni
+with st.sidebar:
+    st.header("Opzioni")
+    selected_option = st.radio("Seleziona una funzione:", ["Crea Corpus", "Genera Giudizi"])
 
 # ==============================================================================
-# SOTTO-SEZIONE: VISUALIZZAZIONE E DOWNLOAD DEL CORPUS TOTALE
+# SEZIONE 5: LOGICA DELLE FUNZIONALITÀ
 # ==============================================================================
-st.write("---")
-st.write("### Corpus Totale per il Fine-Tuning")
-if not st.session_state.corpus.empty:
-    st.dataframe(st.session_state.corpus)
-    st.success(f"Il corpus totale contiene {len(st.session_state.corpus)} righe pronte per l'addestramento.")
-    
-    # Prepara il file in memoria per il download.
-    corpus_buffer = BytesIO()
-    with pd.ExcelWriter(corpus_buffer, engine='openpyxl') as writer:
-        st.session_state.corpus.to_excel(writer, index=False, sheet_name='Corpus Totale')
-    corpus_buffer.seek(0)
-    
-    st.download_button(
-        label="Scarica il Corpus Totale",
-        data=corpus_buffer,
-        file_name="corpus_totale.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# Logica per la creazione del corpus
+if selected_option == "Crea Corpus":
+    st.subheader("Costruisci il tuo Corpus per il Fine-Tuning")
+    st.markdown("Carica uno o più file Excel. Il sistema identificherà le colonne e creerà un dataset unico per l'addestramento.")
+
+    uploaded_files_corpus = st.file_uploader(
+        "Carica uno o più file Excel",
+        type=["xlsx", "xls", "xlsm"],
+        accept_multiple_files=True
     )
-else:
-    st.info("Carica i file per iniziare a costruire il tuo corpus.")
+
+    if uploaded_files_corpus:
+        with st.spinner("Preparazione del corpus in corso..."):
+            for uploaded_file in uploaded_files_corpus:
+                file_path = save_uploaded_file(uploaded_file)
+                if file_path:
+                    try:
+                        new_data = load_and_prepare_excel(file_path)
+                        if not new_data.empty:
+                            st.session_state.corpus = pd.concat([st.session_state.corpus, new_data], ignore_index=True).drop_duplicates()
+                            st.session_state.last_action_status = f"File '{uploaded_file.name}' elaborato e aggiunto al corpus."
+                        else:
+                            st.session_state.last_action_status = f"Impossibile elaborare il contenuto di '{uploaded_file.name}' o non contiene dati validi."
+                    except Exception as e:
+                        st.session_state.last_action_status = f"Errore nell'elaborazione di '{uploaded_file.name}': {e}"
+                        st.error(st.session_state.last_action_status)
+
+    if not st.session_state.corpus.empty:
+        st.write("---")
+        st.write("### Corpus Totale per il Fine-Tuning")
+        st.dataframe(st.session_state.corpus)
+        st.success(f"Il corpus totale contiene {len(st.session_state.corpus)} righe pronte per l'addestramento.")
+
+        corpus_buffer = BytesIO()
+        with pd.ExcelWriter(corpus_buffer, engine='openpyxl') as writer:
+            st.session_state.corpus.to_excel(writer, index=False, sheet_name='Corpus Totale')
+        corpus_buffer.seek(0)
+        
+        st.download_button(
+            label="Scarica il Corpus Totale",
+            data=corpus_buffer,
+            file_name="corpus_totale.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.info("Carica i file per iniziare a costruire il tuo corpus.")
+
+    if st.session_state.last_action_status:
+        st.markdown(f"**Stato:** {st.session_state.last_action_status}")
+        st.session_state.last_action_status = ""
+
+# Logica per la generazione di giudizi
+if selected_option == "Genera Giudizi":
+    st.subheader("Genera Giudizi su un File Esistente")
+    st.markdown("Carica un file Excel con la colonna 'Giudizio' da completare. **Questa funzionalità richiede un modello già addestrato.**")
     
+    # La logica di caricamento del modello e di fine-tuning non è inclusa in questo snippet.
+    # Dovrai aggiungere qui il codice per caricare il modello addestrato.
+
+    uploaded_file_generate = st.file_uploader(
+        "Carica file Excel da completare",
+        type=["xlsx", "xls", "xlsm"]
+    )
+
+    if uploaded_file_generate:
+        file_path_generate = save_uploaded_file(uploaded_file_generate)
+        if file_path_generate:
+            st.session_state.process_file_path = file_path_generate
+            try:
+                # Leggiamo il file senza preparare il corpus, per ottenere i nomi dei fogli.
+                workbook = openpyxl.load_workbook(file_path_generate)
+                sheet_names = workbook.sheetnames
+                st.session_state.sheet_names = sheet_names
+            except Exception as e:
+                st.error(f"Errore nella lettura del file per ottenere i fogli: {e}")
+                st.session_state.sheet_names = []
+    
+    if 'sheet_names' in st.session_state and st.session_state.sheet_names:
+        selected_sheet = st.selectbox(
+            "Seleziona il Foglio di Lavoro da completare",
+            options=st.session_state.sheet_names
+        )
+
+        if st.button("Avvia Generazione"):
+            if selected_sheet and st.session_state.process_file_path:
+                with st.spinner("Generazione dei giudizi in corso..."):
+                    try:
+                        # Leggiamo il file e il foglio selezionato
+                        df_to_complete = pd.read_excel(st.session_state.process_file_path, sheet_name=selected_sheet)
+                        
+                        # Aggiungere qui la logica di caricamento del modello e generazione
+                        # Questa è solo una simulazione del processo di generazione.
+                        giudizio_col = "Giudizio" # Questo andrebbe cercato in modo dinamico
+                        if giudizio_col not in df_to_complete.columns:
+                            st.warning("Colonna 'Giudizio' non trovata. Impossibile procedere.")
+                        else:
+                            for index, row in df_to_complete.iterrows():
+                                if pd.isna(row[giudizio_col]):
+                                    # Genera il giudizio usando il modello
+                                    # Esempio: generated_judgement = modello.generate(...)
+                                    df_to_complete.loc[index, giudizio_col] = f"Giudizio generato per la riga {index + 1}."
+                                st.session_state.generation_status = "Generazione completata con successo!"
+                                st.session_state.process_completed_file = df_to_complete
+                                
+                    except Exception as e:
+                        st.error(f"Errore durante la generazione: {e}\n\nTraceback:\n{traceback.format_exc()}")
+            else:
+                st.warning("Per favore, seleziona un foglio di lavoro.")
+    
+    if st.session_state.generation_status:
+        st.success(st.session_state.generation_status)
+        if st.session_state.process_completed_file is not None:
+            st.write("### Scarica il file completato")
+            output_buffer = BytesIO()
+            with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+                st.session_state.process_completed_file.to_excel(writer, index=False, sheet_name=selected_sheet)
+            output_buffer.seek(0)
+            
+            st.download_button(
+                label="Scarica il file aggiornato",
+                data=output_buffer,
+                file_name=f"giudizi_aggiornati.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
