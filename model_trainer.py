@@ -1,173 +1,168 @@
 # ==============================================================================
 # File: model_trainer.py
-# Modulo per l'addestramento (Fine-Tuning) del modello di linguaggio.
+# Modulo per la logica di addestramento (fine-tuning) del modello.
 # ==============================================================================
 
 # SEZIONE 1: LIBRERIE NECESSARIE
 # ==============================================================================
-# Importiamo tutte le librerie essenziali per l'addestramento.
-import torch
-import warnings
+import os
+import streamlit as st
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, TrainingArguments, Trainer, DataCollatorForSeq2Seq
-from peft import LoraConfig, get_peft_model, TaskType, PeftModel
-import os
-import shutil
-import traceback
-from datetime import datetime
+from peft import LoraConfig, get_peft_model, TaskType
 from transformers.trainer_callback import TrainerCallback
-import json
+import torch
+import shutil
+import warnings
 
-# Ignoriamo i FutureWarning per una console più pulita.
+# Ignoriamo i FutureWarning per mantenere la console pulita
 warnings.filterwarnings("ignore")
 
 # ==============================================================================
 # SEZIONE 2: CONFIGURAZIONE GLOBALE
 # ==============================================================================
-
-# Directory dove il modello addestrato verrà salvato.
 OUTPUT_DIR = "modello_finetunato"
-# Il nome del modello pre-addestrato di base da utilizzare.
 MODEL_NAME = "google/flan-t5-base"
 
 # ==============================================================================
-# SEZIONE 3: CLASSI E CALLBACK PERSONALIZZATI
+# SEZIONE 3: CLASSE DI CALLBACK PER STREAMLIT
 # ==============================================================================
+class StreamlitCallback(TrainerCallback):
+    """
+    Una callback personalizzata per aggiornare lo stato dell'interfaccia utente di Streamlit
+    durante l'addestramento del modello.
+    """
+    def __init__(self, add_status_message):
+        self.add_status_message = add_status_message
+        self.total_steps = 0
+        self.progress_bar = None
 
-class SaveEveryNStepsCallback(TrainerCallback):
-    """
-    Un callback personalizzato per salvare il modello e lo stato del trainer
-    ogni N passi di addestramento.
-    """
-    def __init__(self, save_steps=500, output_dir="."):
-        self.save_steps = save_steps
-        self.output_dir = output_dir
+    def on_train_begin(self, args, state, control, **kwargs):
+        """Chiamato all'inizio dell'addestramento."""
+        self.total_steps = state.max_steps
+        self.add_status_message(f"Addestramento avviato per {self.total_steps} step.")
+        # Usiamo un'istruzione condizionale per evitare errori di st.progress
+        if 'progress_bar' not in st.session_state:
+            st.session_state.progress_bar = st.progress(0, text="Progresso addestramento...")
+        self.progress_bar = st.session_state.progress_bar
 
     def on_step_end(self, args, state, control, **kwargs):
-        """
-        Viene chiamata alla fine di ogni passo di addestramento.
-        """
-        if state.global_step > 0 and state.global_step % self.save_steps == 0:
-            print(f"Checkpoint! Salvataggio del modello al passo {state.global_step}...")
-            # Salva il modello PEFT (solo gli adattatori LoRA)
-            model = kwargs.get("model")
-            if model:
-                model.save_pretrained(os.path.join(self.output_dir, f"checkpoint-{state.global_step}"))
-            
-            # Salva lo stato del trainer per la resumibilità
-            trainer = kwargs.get("trainer")
-            if trainer:
-                trainer.save_state()
-            
-            print(f"Modello e stato del trainer salvati in {self.output_dir}/checkpoint-{state.global_step}")
+        """Chiamato alla fine di ogni step di addestramento."""
+        if self.progress_bar:
+            progress_percentage = state.global_step / self.total_steps
+            self.progress_bar.progress(progress_percentage, text=f"Step {state.global_step}/{self.total_steps} completato.")
+        
+        # Salvataggio automatico del modello ogni 500 step
+        if state.global_step % 500 == 0:
+            control.should_save = True
+            self.add_status_message(f"Checkpoint logico: Salvataggio del modello allo step {state.global_step}.")
+        
+        # Esegui la valutazione ogni 500 step
+        if state.global_step % 500 == 0 and state.global_step > 0:
+            control.should_evaluate = True
+            self.add_status_message(f"Esecuzione della valutazione allo step {state.global_step}.")
+
+    def on_save(self, args, state, control, **kwargs):
+        """Chiamato ogni volta che il modello viene salvato."""
+        self.add_status_message(f"Modello salvato in: {control.save_path}")
+
+    def on_train_end(self, args, state, control, **kwargs):
+        """Chiamato alla fine dell'addestramento."""
+        if self.progress_bar:
+            self.progress_bar.progress(1.0, text="Addestramento completato!")
+        self.add_status_message("Fine-tuning terminato con successo.")
 
 # ==============================================================================
-# SEZIONE 4: FUNZIONE PRINCIPALE DI FINE-TUNING
+# SEZIONE 4: FUNZIONI PRINCIPALI
 # ==============================================================================
 
 def fine_tune_model(corpus_df):
     """
-    Esegue il fine-tuning del modello T5 con un dataset fornito.
+    Esegue il fine-tuning di un modello T5-base con i dati forniti.
 
     Args:
-        corpus_df (pd.DataFrame): Il DataFrame contenente le colonne 'input_text' e 'target_text'.
+        corpus_df (pd.DataFrame): DataFrame contenente le colonne 'input_text' e 'target_text'.
 
     Returns:
-        str: Il percorso della directory dove il modello addestrato è stato salvato.
+        str: Il percorso della directory del modello salvato, o None in caso di errore.
     """
     try:
-        # Step 1: Prepara il dataset e il tokenizer
-        print("Preparazione del dataset e del tokenizer...")
-        dataset = Dataset.from_pandas(corpus_df)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        if os.path.exists(OUTPUT_DIR):
+            shutil.rmtree(OUTPUT_DIR)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
         
-        def preprocess_function(examples):
-            """
-            Funzione per tokenizzare gli esempi di input e target.
-            """
-            model_inputs = tokenizer(examples['input_text'], max_length=512, truncation=True, padding="max_length")
-            labels = tokenizer(examples['target_text'], max_length=512, truncation=True, padding="max_length")
-            model_inputs["labels"] = labels["input_ids"]
-            return model_inputs
-
-        tokenized_dataset = dataset.map(preprocess_function, batched=True)
-        data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=MODEL_NAME)
-
-        # Step 2: Carica il modello e configura LoRA
-        print("Caricamento del modello e configurazione PEFT (LoRA)...")
+        # Inizializza tokenizer e modello
+        add_status_message = st.session_state.add_status_message
+        
+        add_status_message(f"Caricamento tokenizer e modello base '{MODEL_NAME}'...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
         
-        # Implementazione di LoRA per un fine-tuning più efficiente
-        lora_config = LoraConfig(
+        # Configurazione PEFT/LoRA
+        peft_config = LoraConfig(
+            task_type=TaskType.SEQ_2_SEQ_LM,
+            inference_mode=False,
             r=8,
             lora_alpha=32,
-            target_modules=["q", "v"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type=TaskType.SEQ_2_SEQ_LM,
+            lora_dropout=0.1
         )
-        peft_model = get_peft_model(model, lora_config)
-        peft_model.print_trainable_parameters()
+        model = get_peft_model(model, peft_config)
+        
+        add_status_message("Modello configurato per il fine-tuning LoRA.")
+        
+        # Prepara il dataset di Hugging Face
+        add_status_message("Conversione del DataFrame in Dataset Hugging Face...")
+        from datasets import Dataset
+        dataset = Dataset.from_pandas(corpus_df)
+        
+        def tokenize_function(examples):
+            tokenized_inputs = tokenizer(examples['input_text'], max_length=512, truncation=True)
+            tokenized_labels = tokenizer(examples['target_text'], max_length=512, truncation=True)
+            tokenized_inputs["labels"] = tokenized_labels["input_ids"]
+            return tokenized_inputs
 
-        # Step 3: Configura gli argomenti di addestramento
-        print("Configurazione degli argomenti di addestramento...")
-        # Aggiungiamo un timestamp per rendere la directory di output unica
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        final_output_dir = os.path.join(OUTPUT_DIR, f"model_{timestamp}")
+        tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset.column_names)
+        
+        add_status_message("Dataset tokenizzato. Pronto per l'addestramento.")
 
+        # Configurazione degli argomenti di addestramento
         training_args = TrainingArguments(
-            output_dir=final_output_dir,
-            auto_find_batch_size=True,
-            learning_rate=1e-3,
-            num_train_epochs=3,
-            logging_dir=f'{final_output_dir}/logs',
+            output_dir=OUTPUT_DIR,
+            num_train_epochs=5,
+            per_device_train_batch_size=4,
+            per_device_eval_batch_size=4,
+            warmup_steps=500,
+            weight_decay=0.01,
+            logging_dir=f'{OUTPUT_DIR}/logs',
             logging_steps=100,
-            save_steps=500, # Salvataggio ogni 500 step
-            save_total_limit=2,
-            per_device_train_batch_size=8,
-            gradient_accumulation_steps=1,
+            save_steps=500,
+            evaluation_strategy="steps", # Allineato con save_steps
+            eval_steps=500,
             load_best_model_at_end=True,
-            metric_for_best_model="eval_loss",
-            greater_is_better=False,
-            report_to="none", # Disabilita i report per non richiedere account esterni
-            fp16=True, # Abilita l'uso del float a 16 bit per velocità e minor consumo di memoria (richiede GPU)
-            push_to_hub=False # Non caricare il modello su Hugging Face Hub
+            report_to="none"
         )
-
-        # Step 4: Avvia il trainer
-        print("Avvio del processo di addestramento...")
+        
+        # Inizializzazione del Trainer
         trainer = Trainer(
-            model=peft_model,
+            model=model,
             args=training_args,
             train_dataset=tokenized_dataset,
-            data_collator=data_collator,
-            callbacks=[SaveEveryNStepsCallback(output_dir=final_output_dir)]
+            eval_dataset=tokenized_dataset,
+            data_collator=DataCollatorForSeq2Seq(tokenizer),
+            callbacks=[StreamlitCallback(add_status_message)]
         )
-
+        
+        # Avvio dell'addestramento
         trainer.train()
+        
+        # Salvataggio finale del modello
+        final_model_dir = os.path.join(OUTPUT_DIR, "final_model")
+        trainer.save_model(final_model_dir)
+        tokenizer.save_pretrained(final_model_dir)
+        
+        add_status_message(f"Modello finale salvato in: {final_model_dir}")
+        return final_model_dir
 
-        # Step 5: Salva il modello finale
-        final_model_path = os.path.join(final_output_dir, "final_model")
-        peft_model.save_pretrained(final_model_path)
-        print(f"Addestramento completato. Modello salvato in: {final_model_path}")
-
-        # Salva il tokenizer
-        tokenizer.save_pretrained(final_model_path)
-        print(f"Tokenizer salvato in: {final_model_path}")
-
-        # Salva lo stato di addestramento
-        trainer.save_state()
-        print(f"Stato di addestramento salvato.")
-
-        # Simuliamo il salvataggio di un file che verrà zippato
-        os.makedirs("dummy_model_directory", exist_ok=True)
-        with open("dummy_model_directory/model_info.json", "w") as f:
-            json.dump({"model": MODEL_NAME, "epochs": training_args.num_train_epochs}, f)
-
-        return final_model_path
-    
     except Exception as e:
-        print("Errore durante il fine-tuning del modello.")
-        traceback.print_exc()
+        print(f"Errore nel fine-tuning: {e}")
         return None
-
