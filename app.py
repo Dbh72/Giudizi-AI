@@ -50,6 +50,10 @@ if 'excel_sheets' not in st.session_state:
     st.session_state.excel_sheets = []
 if 'selected_sheet' not in st.session_state:
     st.session_state.selected_sheet = None
+if 'last_processed_index' not in st.session_state:
+    st.session_state.last_processed_index = 0
+if 'df_to_complete' not in st.session_state:
+    st.session_state.df_to_complete = None
 
 # ==============================================================================
 # SEZIONE 2: FUNZIONI PER IL FINE-TUNING
@@ -211,7 +215,7 @@ with st.expander("📂 Prepara Corpus per Fine-Tuning", expanded=True):
 # =========================
 with st.expander("📝 Genera Giudizi su File", expanded=True):
     st.header("Completa un File Excel")
-    st.markdown("Carica un file Excel con la colonna 'Giudizio' vuota. Il modello compilerà la colonna e potrai scaricare il file aggiornato.")
+    st.markdown("Carica un file Excel con la colonna 'Giudizio' vuota. Il modello compilerà la colonna e potrai scaricare il file aggiornato. **Se riavvii il processo, riprenderà dall'ultimo giudizio completato.**")
     
     # Widget per il caricamento del file e la selezione del foglio
     excel_file_input = st.file_uploader(
@@ -236,23 +240,35 @@ with st.expander("📝 Genera Giudizi su File", expanded=True):
         except Exception as e:
             st.error(f"Errore nel caricamento dei fogli di lavoro: {e}")
             
-    # Funzione per l'elaborazione del file (fittizia)
+    # Funzione per l'elaborazione del file (fittizia con checkpoint)
     def process_excel_for_judgments(file_data, selected_sheet):
         try:
-            df_to_complete = pd.read_excel(file_data, sheet_name=selected_sheet)
-            giudizio_col = find_giudizio_column(df_to_complete)
+            # Carica il file solo se non è già nello stato della sessione
+            if st.session_state.df_to_complete is None:
+                st.session_state.df_to_complete = pd.read_excel(file_data, sheet_name=selected_sheet)
+                st.session_state.last_processed_index = 0
+            
+            giudizio_col = find_giudizio_column(st.session_state.df_to_complete)
 
             if giudizio_col is None:
                 st.warning("La colonna 'Giudizio' non è stata trovata. Impossibile procedere.")
                 return
 
             with st.spinner(f"Generazione giudizi per il foglio '{selected_sheet}' in corso..."):
-                df_to_complete[giudizio_col] = df_to_complete.apply(
-                    lambda row: f"Giudizio generato per la riga {row.name + 1}. (Simulato)", axis=1
-                )
-
+                # Checkpoint logico: riprendiamo dall'ultimo indice elaborato
+                # QUESTA È LA LOGICA DI CHECKPOINTING E RESUMIBILITÀ:
+                for index in range(st.session_state.last_processed_index, len(st.session_state.df_to_complete)):
+                    st.session_state.df_to_complete.loc[index, giudizio_col] = f"Giudizio generato per la riga {index + 1}. (Simulato)"
+                    st.session_state.last_processed_index = index + 1
+                    # Aggiungi qui la logica per salvare il file a intervalli regolari
+                    # ad esempio, ogni 50 righe, per avere un vero checkpointing.
+                    
+                    # Simula un'interruzione per dimostrare la resumibilità
+                    # if index == 5:
+                    #     raise Exception("Simulazione di un errore o interruzione.")
+                    
             st.session_state.generation_status = "Generazione completata con successo!"
-            st.session_state.process_completed_file = df_to_complete
+            st.session_state.process_completed_file = st.session_state.df_to_complete
 
         except Exception as e:
             st.error(f"Errore durante la generazione: {e}\n\nTraceback:\n{traceback.format_exc()}")
