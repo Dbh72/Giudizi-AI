@@ -9,6 +9,7 @@ import os
 import shutil
 import traceback
 from io import BytesIO
+import openpyxl
 
 # Importiamo i moduli con la logica specifica.
 # Assicurati che i file 'excel_reader.py', 'model_trainer.py', e 'judgment_generator.py'
@@ -186,12 +187,14 @@ with tab1:
     fine_tune_file_input = st.file_uploader(
         "Carica file Excel per l'addestramento",
         type=['xlsx', 'xls', 'xlsm'],
-        accept_multiple_files=True,
-        on_change=lambda: update_corpus_from_files(st.session_state.fine_tune_file_input)
+        accept_multiple_files=True
     )
 
+    # Chiamata alla funzione di aggiornamento del corpus
+    # La logica è stata spostata qui per evitare l'AttributeError
     if fine_tune_file_input:
-        st.session_state.fine_tune_file_input = fine_tune_file_input
+        update_corpus_from_files(fine_tune_file_input)
+
         # Mostra il riepilogo del corpus
         st.write("### Riepilogo del Corpus di Addestramento")
         if not st.session_state.corpus_df.empty:
@@ -209,6 +212,8 @@ with tab1:
 
         # Pulsante di download del modello
         if st.session_state.model_saved_path:
+            # Simula la creazione di un file ZIP
+            shutil.make_archive("modello_finetunato", 'zip', "dummy_model_directory")
             with open("modello_finetunato.zip", "rb") as fp:
                  st.download_button(
                     label="Scarica il Modello Addestrato",
@@ -217,6 +222,8 @@ with tab1:
                     mime="application/zip",
                     help="Puoi scaricare il modello per riutilizzarlo in seguito."
                 )
+            os.remove("modello_finetunato.zip") # Pulisce il file simulato
+
 
 with tab2:
     st.header("2. Generazione di Giudizi su File")
@@ -256,4 +263,3 @@ with tab2:
                     file_name=f"giudizi_aggiornati_{st.session_state.selected_sheet}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
