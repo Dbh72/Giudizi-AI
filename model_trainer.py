@@ -36,71 +36,66 @@ MODEL_NAME = "google/flan-t5-base"
 
 class SaveEveryNStepsCallback(TrainerCallback):
     """
-    Callback personalizzato per salvare il modello ogni N passi,
-    sovrascrivendo la cartella del modello PEFT.
+    Un callback personalizzato per salvare il modello e lo stato di addestramento
+    ogni N passi.
     """
     def __init__(self, output_dir, save_steps=500):
         self.output_dir = output_dir
         self.save_steps = save_steps
-        self.last_saved_step = -1
+        os.makedirs(self.output_dir, exist_ok=True)
 
     def on_step_end(self, args, state, control, **kwargs):
-        if state.global_step > 0 and state.global_step % self.save_steps == 0 and state.global_step > self.last_saved_step:
-            print(f"Salvataggio del modello al passo {state.global_step}...")
-            # Salvataggio del modello PEFT e del tokenizer
-            peft_model = kwargs.get('model')
-            tokenizer = kwargs.get('tokenizer')
+        if state.global_step % self.save_steps == 0:
+            print(f"Salvataggio del checkpoint al passo {state.global_step}...")
+            # Salva il modello PEFT
+            checkpoint_dir = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
+            kwargs['model'].save_pretrained(checkpoint_dir)
+            # Salva il tokenizer
+            kwargs['tokenizer'].save_pretrained(checkpoint_dir)
+            # Salva lo stato del trainer
+            state.save_to_json(os.path.join(checkpoint_dir, "trainer_state.json"))
+            print(f"Checkpoint salvato in: {checkpoint_dir}")
             
-            output_path = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
-            peft_model.save_pretrained(output_path)
-            tokenizer.save_pretrained(output_path)
-            print(f"Modello salvato in: {output_path}")
-            self.last_saved_step = state.global_step
-
-def tokenize_function(examples, tokenizer, max_length=512):
-    """
-    Funzione per la tokenizzazione dei dati di input e target.
-    Aggiunge il token di fine sequenza al target.
-    """
-    model_inputs = tokenizer(examples['input_text'], max_length=max_length, truncation=True)
-    labels = tokenizer(text_target=examples['target_text'], max_length=max_length, truncation=True)
-    model_inputs['labels'] = labels['input_ids']
-    return model_inputs
-
 # ==============================================================================
 # SEZIONE 4: FUNZIONE DI FINE-TUNING
 # ==============================================================================
 
 def fine_tune_model(corpus_df, fine_tuning_state):
     """
-    Esegue il fine-tuning del modello di linguaggio.
+    Esegue il fine-tuning di un modello di linguaggio utilizzando i dati del corpus.
 
     Args:
-        corpus_df (pd.DataFrame): DataFrame contenente i dati di addestramento.
-        fine_tuning_state (dict): Dizionario di stato per la gestione dei checkpoint.
+        corpus_df (pd.DataFrame): Il DataFrame contenente il corpus di addestramento.
+        fine_tuning_state (dict): Un dizionario di stato per aggiornare i progressi.
 
     Returns:
-        str: Il percorso della directory del modello salvato.
+        str: Il percorso della directory del modello fine-tuned.
     """
-    print("Avvio del fine-tuning del modello...")
     try:
-        # Step 1: Prepara il dataset
-        # Aggiungiamo il checkpointing logico qui
+        # Checkpoint 1: Preparazione e tokenizzazione del dataset.
+        print("Avvio del fine-tuning del modello...")
         print("Checkpoint 1: Preparazione e tokenizzazione del dataset.")
         
-        # Converti il DataFrame in un Hugging Face Dataset
-        dataset = Dataset.from_pandas(corpus_df)
-
-        # Carica il tokenizer
+        # Inizializza tokenizer e modello
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        
-        # Tokenizza il dataset
-        tokenized_dataset = dataset.map(lambda examples: tokenize_function(examples, tokenizer), batched=True)
+        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
-        # Step 2: Carica il modello base e configura PEFT
-        # Aggiungiamo il checkpointing logico qui
-        print("Checkpoint 2: Caricamento del modello base e configurazione PEFT.")
+        # Prepara il dataset Hugging Face
+        dataset = Dataset.from_pandas(corpus_df)
         
+        # Tokenizza i dati
+        def tokenize_function(examples):
+            # Aggiungi il prefisso "train: " per il fine-tuning di un modello T5
+            inputs = [f"giudizio: {text}" for text in examples["input_text"]]
+            model_inputs = tokenizer(inputs, max_length=512, truncation=True)
+            labels = tokenizer(examples["target_text"], max_length=512, truncation=True)
+            model_inputs["labels"] = labels["input_ids"]
+            return model_inputs
+
+        tokenized_dataset = dataset.map(tokenize_function, batched=True)
+
+        # Checkpoint 2: Caricamento del modello base e configurazione PEFT.
+        print("Checkpoint 2: Caricamento del modello base e configurazione PEFT.")
         peft_config = LoraConfig(
             task_type=TaskType.SEQ_2_SEQ_LM,
             inference_mode=False,
@@ -109,75 +104,51 @@ def fine_tune_model(corpus_df, fine_tuning_state):
             lora_dropout=0.1,
             target_modules=["q", "v"]
         )
-
-        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
         peft_model = get_peft_model(model, peft_config)
         peft_model.print_trainable_parameters()
 
-        # Data Collator per il padding dinamico
-        data_collator = DataCollatorForSeq2Seq(tokenizer, model=peft_model)
-        
-        # Step 3: Configura gli argomenti di addestramento
-        # Aggiungiamo il checkpointing logico qui
+        # Checkpoint 3: Configurazione degli argomenti di addestramento.
         print("Checkpoint 3: Configurazione degli argomenti di addestramento.")
         
-        # Impostiamo il percorso di output finale, rimuovendo la cartella se esiste
-        final_output_dir = os.path.join(OUTPUT_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
-        if os.path.exists(final_output_dir):
-            shutil.rmtree(final_output_dir)
-        os.makedirs(final_output_dir, exist_ok=True)
+        # Verifica se esiste un checkpoint precedente
+        last_checkpoint = None
+        if os.path.exists(OUTPUT_DIR):
+            checkpoints = [d for d in os.listdir(OUTPUT_DIR) if os.path.isdir(os.path.join(OUTPUT_DIR, d)) and d.startswith("checkpoint-")]
+            if checkpoints:
+                # Trova il checkpoint con il numero di step più alto
+                last_checkpoint = os.path.join(OUTPUT_DIR, sorted(checkpoints, key=lambda x: int(x.split('-')[1]))[-1])
+                print(f"Trovato checkpoint precedente: {last_checkpoint}. Riprendo l'addestramento.")
         
-        # Controlliamo se esiste uno stato di addestramento precedente
-        resume_from_checkpoint = False
-        if fine_tuning_state.get("last_checkpoint"):
-            resume_from_checkpoint = fine_tuning_state["last_checkpoint"]
-            print(f"Riprendo l'addestramento dal checkpoint: {resume_from_checkpoint}")
-        
+        # Rimuoviamo gli argomenti che causano l'errore
         training_args = TrainingArguments(
-            output_dir=final_output_dir,
-            per_device_train_batch_size=8,
-            per_device_eval_batch_size=8,
+            output_dir=OUTPUT_DIR,
             num_train_epochs=3,
+            per_device_train_batch_size=4,
+            gradient_accumulation_steps=4,
             learning_rate=2e-4,
             weight_decay=0.01,
-            fp16=torch.cuda.is_available(), # Abilita l'accelerazione GPU solo se disponibile
-            logging_dir='./logs',
-            logging_steps=100,
-            save_strategy="steps", # Strategia di salvataggio
-            save_steps=500, # Salva ogni 500 step
-            evaluation_strategy="steps", # Strategia di valutazione
-            eval_steps=500, # Valuta ogni 500 step
-            load_best_model_at_end=True,
-            metric_for_best_model="eval_loss",
-            gradient_checkpointing=True,
-            report_to="none", # Non riportare a W&B o altri
-            gradient_accumulation_steps=1,
-            overwrite_output_dir=True,
-            save_total_limit=3, # Limita il numero di checkpoint salvati
-            resume_from_checkpoint=resume_from_checkpoint,
-            disable_tqdm=False,
-            do_eval=True # Aggiunto per garantire il corretto funzionamento di evaluation_strategy
+            warmup_steps=500,
+            save_steps=500,
+            logging_steps=500, # Continua a loggare i progressi
+            report_to="none", # Disabilita i log a servizi esterni
+            fp16=torch.cuda.is_available(), # Usa fp16 se la GPU è disponibile
+            push_to_hub=False # Non caricare il modello su Hugging Face Hub
         )
 
         # Step 4: Avvia il trainer
-        # Aggiungiamo il checkpointing logico qui
-        print("Checkpoint 4: Avvio del processo di addestramento.")
-        
+        print("Avvio del processo di addestramento...")
         trainer = Trainer(
             model=peft_model,
             args=training_args,
             train_dataset=tokenized_dataset,
-            data_collator=data_collator,
-            callbacks=[SaveEveryNStepsCallback(output_dir=final_output_dir)]
+            data_collator=DataCollatorForSeq2Seq(tokenizer, model=peft_model),
+            callbacks=[SaveEveryNStepsCallback(output_dir=OUTPUT_DIR)]
         )
 
-        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+        trainer.train(resume_from_checkpoint=last_checkpoint)
 
         # Step 5: Salva il modello finale
-        # Aggiungiamo il checkpointing logico qui
-        print("Checkpoint 5: Salvataggio del modello finale.")
-        
-        final_model_path = os.path.join(final_output_dir, "final_model")
+        final_model_path = os.path.join(OUTPUT_DIR, "final_model")
         peft_model.save_pretrained(final_model_path)
         print(f"Addestramento completato. Modello salvato in: {final_model_path}")
 
@@ -188,10 +159,11 @@ def fine_tune_model(corpus_df, fine_tuning_state):
         # Salva lo stato di addestramento
         trainer.save_state()
         print(f"Stato di addestramento salvato.")
-        
+
         return final_model_path
 
     except Exception as e:
-        print(f"Errore nel fine-tuning: {e}")
-        print(traceback.format_exc())
+        print(f"Errore durante il fine-tuning: {e}")
+        print("Traceback:", traceback.format_exc())
+        fine_tuning_state.update({"status": f"Errore: {e}", "progress": 0.0, "current_step": "Errore durante l'addestramento."})
         raise e
