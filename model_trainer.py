@@ -94,6 +94,11 @@ def fine_tune_model(corpus_df, fine_tuning_state):
 
         tokenized_dataset = dataset.map(tokenize_function, batched=True)
 
+        # NUOVO: Dividiamo il dataset in un set di addestramento e uno di validazione (90/10)
+        split_dataset = tokenized_dataset.train_test_split(test_size=0.1)
+        train_dataset = split_dataset['train']
+        eval_dataset = split_dataset['test']
+
         # Checkpoint 2: Caricamento del modello base e configurazione PEFT.
         print("Checkpoint 2: Caricamento del modello base e configurazione PEFT.")
         peft_config = LoraConfig(
@@ -119,7 +124,7 @@ def fine_tune_model(corpus_df, fine_tuning_state):
                 last_checkpoint = os.path.join(OUTPUT_DIR, sorted(checkpoints, key=lambda x: int(x.split('-')[1]))[-1])
                 print(f"Trovato checkpoint precedente: {last_checkpoint}. Riprendo l'addestramento.")
         
-        # Rimuoviamo gli argomenti che causano l'errore
+        # NOTA: Ora includiamo evaluation_strategy perché abbiamo un eval_dataset
         training_args = TrainingArguments(
             output_dir=OUTPUT_DIR,
             num_train_epochs=3,
@@ -132,7 +137,10 @@ def fine_tune_model(corpus_df, fine_tuning_state):
             logging_steps=500, # Continua a loggare i progressi
             report_to="none", # Disabilita i log a servizi esterni
             fp16=torch.cuda.is_available(), # Usa fp16 se la GPU è disponibile
-            push_to_hub=False # Non caricare il modello su Hugging Face Hub
+            push_to_hub=False, # Non caricare il modello su Hugging Face Hub
+            evaluation_strategy="epoch",  # Esegue la valutazione alla fine di ogni epoca
+            save_strategy="epoch",        # Salva un checkpoint alla fine di ogni epoca
+            load_best_model_at_end=True,  # Carica il modello migliore dopo l'addestramento
         )
 
         # Step 4: Avvia il trainer
@@ -140,7 +148,8 @@ def fine_tune_model(corpus_df, fine_tuning_state):
         trainer = Trainer(
             model=peft_model,
             args=training_args,
-            train_dataset=tokenized_dataset,
+            train_dataset=train_dataset,  # Passa il set di addestramento
+            eval_dataset=eval_dataset,    # Passa il set di validazione
             data_collator=DataCollatorForSeq2Seq(tokenizer, model=peft_model),
             callbacks=[SaveEveryNStepsCallback(output_dir=OUTPUT_DIR)]
         )
