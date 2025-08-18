@@ -33,36 +33,45 @@ def _process_text_in_chunks(model, tokenizer, input_text, max_length=512, chunk_
         model (PeftModel): Il modello fine-tuned.
         tokenizer (AutoTokenizer): Il tokenizer del modello.
         input_text (str): Il testo di input da elaborare.
-        max_length (int): La lunghezza massima di input che il modello può gestire.
-        chunk_overlap (int): Il numero di token che si sovrappongono tra i chunk.
+        max_length (int): La lunghezza massima di input per il modello.
+        chunk_overlap (int): La sovrapposizione tra i chunk.
 
     Returns:
-        str: Il giudizio riassemblato.
+        str: Il giudizio generato combinando i chunk.
     """
-    tokens = tokenizer.encode(input_text)
-    token_chunks = []
-    
-    # Crea i chunk con sovrapposizione
-    for i in range(0, len(tokens), max_length - chunk_overlap):
-        chunk = tokens[i:i + max_length]
-        token_chunks.append(chunk)
+    # Tokenizza l'input e ottiene il numero di token
+    tokens = tokenizer.encode(input_text, return_tensors='pt', truncation=False)
+    num_tokens = tokens.shape[1]
 
+    # Se il testo è già abbastanza corto, lo processa direttamente
+    if num_tokens <= max_length:
+        input_ids = tokens.to(model.device)
+        generated_ids = model.generate(input_ids, max_length=150, num_beams=5, early_stopping=True)
+        return tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+    
+    # Calcola il passo per il chunking
+    step = max_length - chunk_overlap
+    chunks = []
+    
+    # Crea i chunk e li aggiunge a una lista
+    for i in range(0, num_tokens, step):
+        chunk_ids = tokens[:, i:i+max_length]
+        chunks.append(chunk_ids)
+        
     generated_texts = []
-    for chunk in token_chunks:
-        # Decodifica il chunk di token in testo
-        chunk_text = tokenizer.decode(chunk, skip_special_tokens=True)
-        # Genera il giudizio per il singolo chunk
-        input_ids = tokenizer.encode(chunk_text, return_tensors="pt").to(model.device)
-        output_ids = model.generate(input_ids)
-        generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
+    # Processa ogni chunk
+    for chunk_ids in chunks:
+        chunk_ids = chunk_ids.to(model.device)
+        generated_ids = model.generate(chunk_ids, max_length=150, num_beams=5, early_stopping=True)
+        generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         generated_texts.append(generated_text)
         
-    # Riassembla i giudizi
-    # Qui usiamo semplicemente uno spazio per unire le frasi,
-    # ma una logica più sofisticata potrebbe essere necessaria a seconda del caso.
-    final_judgment = " ".join(generated_texts)
-    return final_judgment.strip()
-
+    # Combina i testi generati, rimuovendo le ridondanze
+    combined_text = " ".join(generated_texts)
+    
+    # Post-processa il testo per rimuovere frasi ripetute o incongrue
+    return combined_text
 
 def generate_judgments_for_excel(model, tokenizer, df_to_complete, giudizio_col, selected_sheet, output_dir, progress_container):
     """
@@ -74,79 +83,74 @@ def generate_judgments_for_excel(model, tokenizer, df_to_complete, giudizio_col,
         df_to_complete (pd.DataFrame): Il DataFrame da completare.
         giudizio_col (str): Il nome della colonna 'Giudizio'.
         selected_sheet (str): Il nome del foglio di lavoro.
-        output_dir (str): La directory del modello fine-tuned.
-        progress_container (list): Una lista per i messaggi di progresso.
+        output_dir (str): La directory dove salvare i file di stato.
+        progress_container (list): Lista per i messaggi di stato di Streamlit.
 
     Returns:
-        pd.DataFrame: Il DataFrame completato con i nuovi giudizi.
+        pd.DataFrame: Il DataFrame completato.
     """
-    state_file = os.path.join(output_dir, f"{selected_sheet}_generation_state.json")
-    
-    # Aggiungi una colonna di stato per tracciare il progresso, se non esiste
-    if 'generation_status' not in df_to_complete.columns:
-        df_to_complete['generation_status'] = 'pending'
+    state_file = os.path.join(output_dir, f"checkpoint_gen_{selected_sheet}.json")
 
-    # Carica lo stato precedente se esiste
+    # Inizializza o carica lo stato
     if os.path.exists(state_file):
         with open(state_file, 'r') as f:
             state = json.load(f)
-        df_to_complete.loc[df_to_complete.index.isin(state['completed_indices']), 'generation_status'] = 'completed'
-        progress_container.append(f"Ripresa della generazione. {len(state['completed_indices'])} righe già completate.")
+        last_index = state.get('last_processed_index', -1)
+        progress_container.append(f"Checkpoint trovato. Riprendo la generazione dalla riga {last_index + 2} del foglio '{selected_sheet}'.")
     else:
-        # Inizializza il file di stato
-        state = {'completed_indices': []}
-        with open(state_file, 'w') as f:
-            json.dump(state, f)
+        last_index = -1
+        state = {'last_processed_index': -1, 'start_time': datetime.now().isoformat()}
+        progress_container.append("Avvio di una nuova sessione di generazione.")
 
-    # Imposta il modello sulla GPU se disponibile
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    # Itera solo sulle righe 'pending'
-    pending_rows = df_to_complete[df_to_complete['generation_status'] == 'pending'].index
-    total_to_process = len(pending_rows)
+    # Aggiungi una colonna di stato per tracciare le righe elaborate
+    df_to_complete['generation_status'] = 'Pending'
+    if last_index > -1:
+        df_to_complete.loc[:last_index, 'generation_status'] = 'Completed'
+        
+    to_process_df = df_to_complete[df_to_complete['generation_status'] == 'Pending']
+    total_to_process = len(to_process_df)
     processed_count = 0
-
-    progress_container.append(f"Inizio della generazione dei giudizi per {total_to_process} righe...")
-
-    for index in pending_rows:
-        try:
-            row = df_to_complete.loc[index]
-            # Assumiamo che la prima colonna contenente testo sia quella di input
+    
+    for index, row in to_process_df.iterrows():
+        input_text = row.get('descrizione') or row.get('input_text')
+        
+        # Trova la colonna "input" per il prompt.
+        input_col = None
+        for col in df_to_complete.columns:
+            if isinstance(col, str) and re.search(r'(input|descrizione|commento|testo)', col, re.IGNORECASE):
+                input_col = col
+                break
+        
+        if input_col is None:
+            # Se non viene trovata, usa la prima colonna come fallback
             input_col = df_to_complete.columns[0]
-            input_text = str(row[input_col]) if pd.notna(row[input_col]) else ""
-
-            if not input_text:
-                continue
-
-            # Check della lunghezza del testo
-            tokens = tokenizer.encode(input_text, return_tensors='pt')
-            if tokens.size(1) > 512:
-                # Se il testo è troppo lungo, lo processa in chunk
+            
+        input_text = str(row[input_col]) if pd.notna(row[input_col]) else ""
+        
+        if pd.isna(row[giudizio_col]) and input_text:
+            try:
+                # Genera il giudizio usando la funzione di chunking
                 generated_judgment = _process_text_in_chunks(model, tokenizer, input_text)
-            else:
-                # Generazione standard
-                input_ids = tokenizer.encode(input_text, return_tensors="pt").to(device)
-                output_ids = model.generate(input_ids)
-                generated_judgment = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
-            # Aggiunge il giudizio al DataFrame
-            df_to_complete.loc[index, giudizio_col] = generated_judgment
-            df_to_complete.loc[index, 'generation_status'] = 'completed'
-
-            # Aggiorna lo stato e il file di stato
-            state['completed_indices'].append(index)
-            with open(state_file, 'w') as f:
-                json.dump(state, f)
-
-            processed_count += 1
-            progress_container.append(f"Generato giudizio per la riga {index + 2}. Progresso: {processed_count}/{total_to_process}")
-
-        except Exception as e:
-            error_message = f"Errore durante la generazione per la riga {index + 2}: {e}"
-            progress_container.append(error_message)
-            print(error_message)
-            continue
+                
+                # Sostituisci il valore NaN con il giudizio generato
+                df_to_complete.at[index, giudizio_col] = generated_judgment
+                
+                # Aggiorna lo stato nel DataFrame
+                df_to_complete.at[index, 'generation_status'] = 'Completed'
+                
+                processed_count += 1
+                progress_container.append(f"Generazione per la riga {index + 2} completata. ({processed_count}/{total_to_process})")
+                print(f"Generazione per la riga {index + 2} completata. ({processed_count}/{total_to_process})")
+                
+                # Aggiorna il checkpoint
+                state['last_processed_index'] = index
+                with open(state_file, 'w') as f:
+                    json.dump(state, f)
+            except Exception as e:
+                error_message = f"Errore durante la generazione per la riga {index + 2}: {e}"
+                progress_container.append(error_message)
+                print(error_message)
+                continue
     
     # Rimuove la colonna di stato e il file di stato una volta completata la generazione
     progress_container.append("Generazione completata con successo!")
@@ -169,14 +173,12 @@ def load_trained_model(model_path):
         # Carica il tokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         # Carica il modello base e applica gli adattatori PEFT
-        base_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+        base_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base", torch_dtype=torch.float16, device_map="auto")
         model = PeftModel.from_pretrained(base_model, model_path)
         
-        print(f"Modello e tokenizer caricati con successo.")
+        print(f"Modello e tokenizer caricati con successo da: {model_path}")
         return model, tokenizer
-        
     except Exception as e:
-        print(f"Errore nel caricare il modello o il tokenizer: {e}")
-        traceback.print_exc()
+        print(f"Errore nel caricamento del modello: {e}")
+        print(traceback.format_exc())
         return None, None
-
