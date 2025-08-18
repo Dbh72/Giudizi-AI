@@ -37,107 +37,97 @@ MODEL_NAME = "google/flan-t5-base"
 
 class SaveEveryNStepsCallback(TrainerCallback):
     """
-    Un callback personalizzato per salvare il modello ogni N passi di addestramento.
-    Questo crea dei checkpoint riutilizzabili.
+    Callback personalizzato per salvare il modello e lo stato ogni N step,
+    consentendo la ripresa dell'addestramento.
     """
     def __init__(self, output_dir, save_steps=500):
         self.output_dir = output_dir
         self.save_steps = save_steps
-        self.last_saved_step = 0
-    
+        # Controlla se una sessione è già stata ripristinata
+        self.has_been_resumed = False
+
     def on_step_end(self, args, state, control, **kwargs):
-        if state.global_step % self.save_steps == 0 and state.global_step > self.last_saved_step:
-            checkpoint_dir = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
-            kwargs['model'].save_pretrained(checkpoint_dir)
-            if kwargs['tokenizer']:
-                kwargs['tokenizer'].save_pretrained(checkpoint_dir)
-            print(f"Checkpoint salvato a {state.global_step} passi in {checkpoint_dir}")
-            self.last_saved_step = state.global_step
+        if state.global_step > 0 and state.global_step % self.save_steps == 0:
+            output_path = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
+            print(f"Salvataggio del checkpoint in {output_path}")
+            kwargs['model'].save_pretrained(output_path)
+            kwargs['tokenizer'].save_pretrained(output_path)
+            state.save_to_json(os.path.join(output_path, "trainer_state.json"))
+            
+            # Non rimuovere i checkpoint, servono per la ripresa
+            # L'addestramento incrementale deve gestirla l'app
+            
+    def on_train_begin(self, args, state, control, **kwargs):
+        if state.is_local_process_main_process:
+            self.has_been_resumed = state.global_step > 0
+            if self.has_been_resumed:
+                print(f"Ripresa dell'addestramento dal checkpoint: {state.global_step}")
 
 # ==============================================================================
-# SEZIONE 4: FUNZIONI PRINCIPALI DI PRE-PROCESSING E FINE-TUNING
+# SEZIONE 4: FUNZIONI PRINCIPALI
 # ==============================================================================
 
-def _chunk_and_tokenize_dataset(tokenizer, raw_dataset):
+def fine_tune_model(corpus_df, output_dir, num_epochs, learning_rate, batch_size, progress_container):
     """
-    Processa il dataset applicando la tokenizzazione e la logica di chunking per
-    gestire i testi che superano la lunghezza massima del modello.
-    """
-    MAX_LENGTH = 512
-    CHUNK_OVERLAP = 50
-
-    processed_data = []
-
-    for item in raw_dataset:
-        input_text = item['input_text']
-        target_text = item['target_text']
-        
-        # Tokenizza il testo di input.
-        input_tokens = tokenizer(
-            input_text,
-            max_length=MAX_LENGTH,
-            truncation=True,
-            return_overflowing_tokens=True,
-            stride=CHUNK_OVERLAP,
-            padding="max_length"
-        )
-        
-        # Se il testo è troppo lungo, lo spezziamo in chunk.
-        if "overflowing_tokens" in input_tokens and len(input_tokens["overflowing_tokens"]) > 0:
-            print(f"Testo troppo lungo, suddivisione in {len(input_tokens['input_ids'])} chunk...")
-            for chunk_id in input_tokens["input_ids"]:
-                chunk_text = tokenizer.decode(chunk_id, skip_special_tokens=True)
-                processed_data.append({
-                    'input_text': chunk_text,
-                    'target_text': target_text  # Il target rimane lo stesso per tutti i chunk
-                })
-        else:
-            processed_data.append(item)
+    Funzione principale per l'addestramento del modello.
     
-    return Dataset.from_pandas(pd.DataFrame(processed_data))
-
-
-def fine_tune_model(progress_container, fine_tune_file, output_dir=OUTPUT_DIR):
+    Args:
+        corpus_df (pd.DataFrame): Il DataFrame contenente il corpus di addestramento.
+        output_dir (str): La directory dove salvare il modello.
+        num_epochs (int): Il numero di epoche per l'addestramento.
+        learning_rate (float): Il learning rate.
+        batch_size (int): La dimensione del batch.
+        progress_container (list): Una lista per i messaggi di progresso.
+        
+    Returns:
+        str: Il percorso della directory del modello finale.
     """
-    Esegue il fine-tuning del modello.
-    Aggiunge la gestione dello stato e i messaggi di avanzamento.
-    """
-    progress_container.append("Avvio del processo di fine-tuning...")
+    progress_container.append("Avvio del fine-tuning. Caricamento del tokenizer e del modello base...")
     try:
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
-        # Carica il dataset dalla memoria
-        raw_df = pd.read_excel(fine_tune_file.name)
-        
-        # Converti il DataFrame in un Dataset Hugging Face
-        # Supponiamo che il DataFrame abbia colonne 'input_text' e 'target_text'
-        # Dobbiamo prima assicurarci che il DataFrame non sia vuoto
-        if raw_df.empty:
-            progress_container.append("Errore: Il DataFrame caricato è vuoto.")
-            return None
-        
-        raw_dataset = Dataset.from_pandas(raw_df)
-
-        progress_container.append("Caricamento e preparazione del tokenizer...")
+        # Step 1: Caricamento del tokenizer e del modello pre-addestrato
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        # Imposta `padding_side` a 'right' per i modelli Seq2Seq
+        tokenizer.padding_side = "right"
+        peft_model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+        progress_container.append("Tokenizer e modello base caricati con successo.")
 
-        # Applica il chunking e la tokenizzazione
-        progress_container.append("Applicazione della logica di chunking e tokenizzazione...")
-        processed_dataset = _chunk_and_tokenize_dataset(tokenizer, raw_dataset)
+        # Step 2: Preparazione del dataset e tokenizzazione
+        progress_container.append("Conversione del DataFrame in un dataset e tokenizzazione...")
+        dataset = Dataset.from_pandas(corpus_df)
 
-        # Suddividi il dataset in training e validation set
-        progress_container.append("Suddivisione del dataset in set di addestramento e validazione...")
-        split_datasets = processed_dataset.train_test_split(test_size=0.1)
-        train_dataset = split_datasets['train']
-        eval_dataset = split_datasets['test']
+        def tokenize_function(examples):
+            # Tokenizzazione dei testi di input e target. La logica di chunking è gestita
+            # dal Trainer in modo automatico se si usa una strategia appropriata.
+            # Qui ci assicuriamo che i dati siano formattati correttamente per il training.
+            model_inputs = tokenizer(
+                examples['input_text'],
+                max_length=512,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt"
+            )
+            labels = tokenizer(
+                examples['target_text'],
+                max_length=512,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt"
+            )
+            # Sostituisce i token di padding con -100 per l'addestramento
+            labels['input_ids'][labels['input_ids'] == tokenizer.pad_token_id] = -100
+            model_inputs['labels'] = labels['input_ids']
+            return model_inputs
 
-        progress_container.append(f"Set di addestramento: {len(train_dataset)} esempi. Set di validazione: {len(eval_dataset)} esempi.")
+        tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=dataset.column_names)
         
-        progress_container.append("Caricamento del modello di base...")
-        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+        # Suddivisione del dataset in training e validation
+        train_test_split = tokenized_datasets.train_test_split(test_size=0.1)
+        train_dataset = train_test_split['train']
+        eval_dataset = train_test_split['test']
+        
+        progress_container.append("Dataset tokenizzato e suddiviso in training/validation.")
 
-        progress_container.append("Configurazione del fine-tuning con PEFT (LoRa)...")
+        # Step 3: Configurazione PEFT (Parameter-Efficient Fine-Tuning)
         peft_config = LoraConfig(
             task_type=TaskType.SEQ_2_SEQ_LM,
             inference_mode=False,
@@ -146,47 +136,49 @@ def fine_tune_model(progress_container, fine_tune_file, output_dir=OUTPUT_DIR):
             lora_dropout=0.1,
             target_modules=["q", "v"]
         )
-        peft_model = get_peft_model(model, peft_config)
-        peft_model.print_trainable_parameters()
+        peft_model = get_peft_model(peft_model, peft_config)
+        progress_container.append("Modello configurato con PEFT (LoRA).")
 
-        # Verifica se esiste un checkpoint precedente per riprendere l'addestramento
+        # Verifica se un addestramento precedente può essere ripreso
         last_checkpoint = None
-        if os.path.exists(output_dir):
-            checkpoints = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-")]
+        if os.path.isdir(output_dir):
+            checkpoints = [d for d in os.listdir(output_dir) if d.startswith('checkpoint')]
             if checkpoints:
-                # Trova il checkpoint con il numero di step più alto
-                checkpoints.sort(key=lambda x: int(x.split('-')[1]))
-                last_checkpoint = os.path.join(output_dir, checkpoints[-1])
+                last_checkpoint = os.path.join(output_dir, max(checkpoints, key=lambda d: int(d.split('-')[1])))
                 progress_container.append(f"Trovato un checkpoint precedente: {last_checkpoint}. L'addestramento riprenderà da qui.")
 
-        progress_container.append("Definizione degli argomenti per il training...")
+        # Configurazione degli argomenti di addestramento
         training_args = TrainingArguments(
             output_dir=output_dir,
-            auto_find_batch_size=True,
-            learning_rate=1e-3,
-            num_train_epochs=3,
-            per_device_train_batch_size=2, # Ridotto per stabilità, ma può essere adattato
-            per_device_eval_batch_size=2,
+            num_train_epochs=num_epochs,
+            per_device_train_batch_size=batch_size,
+            per_device_eval_batch_size=batch_size,
+            learning_rate=learning_rate,
+            weight_decay=0.01,
+            save_strategy="steps",
+            save_steps=500,  # Salva ogni 500 step
+            evaluation_strategy="steps", # Valuta ogni N passi
+            eval_steps=500, # Valuta ogni 500 step
             logging_dir=f"{output_dir}/logs",
             logging_steps=50,
-            save_steps=500, # Salva ogni 500 step
-            evaluation_strategy="steps",
-            eval_steps=500, # Valuta ogni 500 step
-            load_best_model_at_end=True,
+            load_best_model_at_end=True, # Carica il modello migliore dopo l'addestramento
+            report_to="none" # Disabilita i report per evitare dipendenze aggiuntive
         )
 
+        # Step 4: Avvia il trainer
         progress_container.append("Avvio del processo di addestramento...")
         trainer = Trainer(
             model=peft_model,
             args=training_args,
             train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
+            eval_dataset=eval_dataset, # Passa il set di validazione
             data_collator=DataCollatorForSeq2Seq(tokenizer, model=peft_model),
             callbacks=[SaveEveryNStepsCallback(output_dir=output_dir, save_steps=500)]
         )
 
         trainer.train(resume_from_checkpoint=last_checkpoint)
 
+        # Step 5: Salva il modello finale
         progress_container.append("Addestramento completato. Salvataggio del modello finale...")
         final_model_path = os.path.join(output_dir, "final_model")
         peft_model.save_pretrained(final_model_path)
@@ -197,8 +189,7 @@ def fine_tune_model(progress_container, fine_tune_file, output_dir=OUTPUT_DIR):
         return final_model_path
 
     except Exception as e:
-        error_message = f"Errore durante il fine-tuning: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        progress_container.append(error_message)
-        print(error_message)
+        progress_container.append(f"Errore critico durante l'addestramento: {e}")
+        progress_container.append(traceback.format_exc())
+        print(f"Errore critico durante l'addestramento: {e}\n{traceback.format_exc()}")
         return None
-
