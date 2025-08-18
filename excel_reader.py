@@ -38,78 +38,89 @@ def find_header_row(file_path, sheet_name):
         sheet_name (str): Il nome del foglio di lavoro.
 
     Returns:
-        int: L'indice della riga di intestazione (basato su 0) o None se non trovata.
+        int: L'indice della riga dell'intestazione (basato su 0) o None se non trovata.
     """
     try:
-        # Apriamo il file con openpyxl per scansionare le righe
-        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        workbook = openpyxl.load_workbook(file_path, read_only=True)
         sheet = workbook[sheet_name]
         
-        # Scansiona le prime 10 righe
-        for i, row in enumerate(sheet.iter_rows(min_row=1, max_row=10)):
-            for cell in row:
-                if isinstance(cell.value, str) and re.search(r'giudizio', cell.value, re.IGNORECASE):
-                    return i # Restituisce l'indice della riga (basato su 0)
+        # Scansiona le prime 10 righe per trovare l'intestazione
+        for i, row in enumerate(sheet.iter_rows(max_row=10, values_only=True)):
+            if row is None:
+                continue
+            
+            # Cerca una colonna che contenga 'giudizio' (case-insensitive)
+            for cell_value in row:
+                if isinstance(cell_value, str) and re.search(r'giudizio', cell_value, re.IGNORECASE):
+                    # Trovato! Restituisci l'indice di riga (basato su 0)
+                    return i
+        
         return None
     except Exception as e:
-        print(f"Errore nella ricerca dell'intestazione per il foglio '{sheet_name}': {e}")
+        print(f"Errore nella ricerca dell'intestazione nel foglio '{sheet_name}': {e}")
         return None
+    finally:
+        # Riporta il cursore all'inizio del file per la successiva lettura di pandas
+        file_path.seek(0)
 
-def load_and_prepare_excel(uploaded_files):
+# ==============================================================================
+# SEZIONE 2: FUNZIONE PRINCIPALE DI CARICAMENTO E PREPARAZIONE
+# ==============================================================================
+
+def load_and_prepare_excel(file_path, progress_container=None):
     """
-    Carica i dati da una lista di file Excel caricati, identifica la colonna di giudizio
-    e crea un corpus di addestramento. Gestisce più fogli di lavoro e file.
+    Carica i dati da un file Excel e li prepara per il fine-tuning.
 
     Args:
-        uploaded_files (list): Una lista di oggetti file caricati da Streamlit.
+        file_path (BytesIO): Il file Excel caricato in memoria.
+        progress_container (list): Una lista per i messaggi di stato.
 
     Returns:
-        pd.DataFrame: Un DataFrame unificato per il fine-tuning o un DataFrame vuoto in caso di errore.
+        pd.DataFrame: Un DataFrame combinato con le colonne 'input_text' e 'target_text'.
     """
     corpus_list = []
-    
-    for uploaded_file in uploaded_files:
-        try:
-            file_path = BytesIO(uploaded_file.getvalue())
-            file_name = uploaded_file.name
 
-            xls = pd.ExcelFile(file_path)
-            sheet_names = xls.sheet_names
-            
-            for sheet_name in sheet_names:
-                print(f"Lavorazione del file '{file_name}', foglio '{sheet_name}'...")
-                
-                # Trova la riga di intestazione
+    try:
+        # Carica il workbook per ottenere i nomi dei fogli
+        workbook = openpyxl.load_workbook(file_path, read_only=True)
+        sheet_names = workbook.sheetnames
+
+        for sheet_name in sheet_names:
+            try:
+                # Trova la riga dell'intestazione
                 header_row_index = find_header_row(file_path, sheet_name)
                 if header_row_index is None:
-                    print(f"Attenzione: La colonna 'Giudizio' non è stata trovata nel foglio '{sheet_name}'. Saltato.")
+                    if progress_container is not None:
+                        progress_container.append(f"Attenzione: La colonna 'Giudizio' non è stata trovata nel foglio '{sheet_name}'. Saltato.")
                     continue
-                
-                # Leggi il DataFrame a partire dalla riga dell'intestazione
+
+                # Carica il foglio di lavoro nel DataFrame, ignorando le righe prima dell'intestazione
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row_index)
                 
-                # Identifica la colonna 'Giudizio'
+                # Trova la colonna 'Giudizio'
                 giudizio_col = find_giudizio_column(df)
                 if not giudizio_col:
-                    print(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet_name}'. Saltato.")
+                    if progress_container is not None:
+                        progress_container.append(f"Attenzione: La colonna 'Giudizio' non è stata trovata nel foglio '{sheet_name}'. Saltato.")
                     continue
 
-                # Rimuovi le colonne non necessarie e le righe completamente vuote
-                df = df.dropna(how='all')
-                df = df.drop(columns=[col for col in df.columns if 'unnamed' in str(col).lower()], errors='ignore')
-
+                # Identifica le altre colonne che non sono 'Giudizio'
                 other_cols = [col for col in df.columns if col != giudizio_col]
+                if not other_cols:
+                    if progress_container is not None:
+                        progress_container.append(f"Attenzione: Nessuna colonna di input trovata nel foglio '{sheet_name}'. Saltato.")
+                    continue
+                
                 data_for_dataset = []
-
-                # Itera sulle righe per creare i dati del dataset
-                for index, row in df.iterrows():
-                    # Salta le righe dove la colonna 'Giudizio' è vuota
-                    if pd.isna(row.get(giudizio_col, None)) or not str(row[giudizio_col]).strip():
+                for _, row in df.iterrows():
+                    # Salta se la colonna 'Giudizio' è vuota o contiene solo spazi bianchi
+                    if pd.isna(row[giudizio_col]) or str(row[giudizio_col]).strip() == "":
                         continue
 
                     prompt_parts = []
                     for col in other_cols:
                         value = row.get(col)
+                        # Salta le celle vuote o con solo spazi bianchi
                         if pd.notna(value) and str(value).strip():
                             prompt_parts.append(f"{col}: {str(value).strip()}")
                     
@@ -124,16 +135,26 @@ def load_and_prepare_excel(uploaded_files):
                         })
                 
                 if not data_for_dataset:
-                    print(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet_name}'. Saltato.")
+                    if progress_container is not None:
+                        progress_container.append(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet_name}'. Saltato.")
                     continue
                 
                 corpus_list.extend(data_for_dataset)
                 
-        except Exception as e:
-            print(f"Errore nella lettura del file '{uploaded_file.name}': {e}\n{traceback.format_exc()}")
+            except Exception as e:
+                if progress_container is not None:
+                    progress_container.append(f"Errore nella lettura del foglio '{sheet_name}': {e}")
+                    progress_container.append(traceback.format_exc())
+                
+        if not corpus_list:
+            if progress_container is not None:
+                progress_container.append("Nessun dato valido trovato in tutti i fogli del file.")
+            return pd.DataFrame()
             
-    if not corpus_list:
-        print("Nessun dato valido trovato in tutti i file.")
+        return pd.DataFrame(corpus_list)
+
+    except Exception as e:
+        if progress_container is not None:
+            progress_container.append(f"Errore nella lettura del file: {e}")
+            progress_container.append(traceback.format_exc())
         return pd.DataFrame()
-        
-    return pd.DataFrame(corpus_list)
