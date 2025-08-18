@@ -7,6 +7,8 @@ import openpyxl
 import re
 from io import BytesIO
 import traceback
+import os
+import shutil
 
 # ==============================================================================
 # SEZIONE 1: FUNZIONI AUSILIARIE
@@ -39,126 +41,160 @@ def find_header_row(file_path, sheet_name):
         sheet_name (str): Il nome del foglio di lavoro.
 
     Returns:
-        int: L'indice (base 0) della riga dell'intestazione o None se non trovata.
+        int: L'indice della riga di intestazione o None se non trovata.
     """
+    file_path.seek(0)
     try:
-        workbook = openpyxl.load_workbook(file_path, read_only=True)
+        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         sheet = workbook[sheet_name]
         
-        # Scansiona le prime 100 righe per trovare l'intestazione
-        for i, row in enumerate(sheet.iter_rows()):
-            header_row = [cell.value for cell in row]
-            for col_name in header_row:
-                if isinstance(col_name, str) and re.search(r'giudizio', col_name, re.IGNORECASE):
+        # Scansiona le prime 15 righe per trovare l'intestazione
+        for i, row in enumerate(sheet.iter_rows(max_row=15)):
+            for cell in row:
+                if isinstance(cell.value, str) and 'giudizio' in cell.value.lower():
                     return i
         return None
     except Exception as e:
-        print(f"Errore nella ricerca della riga di intestazione: {e}")
+        print(f"Errore nella ricerca dell'intestazione: {e}")
         return None
-        
-def prepare_training_data(file_path):
-    """
-    Prepara un DataFrame di addestramento da un file Excel, leggendo tutti i fogli
-    e cercando le colonne 'input' e 'target' (o 'giudizio').
 
-    Args:
-        file_path (BytesIO): Il file Excel caricato in memoria.
-
-    Returns:
-        pd.DataFrame: Un DataFrame con colonne 'input_text' e 'target_text' o un DataFrame vuoto.
+def read_excel_file_to_df(file_path, progress_container=None):
     """
+    Legge un file Excel e unisce i dati da tutti i fogli di lavoro in un unico DataFrame.
+    """
+    corpus_list = []
     try:
         file_path.seek(0)
-        excel_file = pd.ExcelFile(file_path)
-        all_data = []
+        xls = pd.ExcelFile(file_path)
+        sheet_names = xls.sheet_names
         
-        for sheet_name in excel_file.sheet_names:
+        if progress_container is not None:
+            progress_container.append(f"Trovati {len(sheet_names)} fogli di lavoro.")
+            
+        for sheet_name in sheet_names:
+            if progress_container is not None:
+                progress_container.append(f"Elaborazione del foglio: '{sheet_name}'...")
+            
             try:
-                # Carica il DataFrame completo per trovare la riga dell'intestazione
+                # Cerca la riga di intestazione
+                file_path.seek(0)
                 header_row_index = find_header_row(file_path, sheet_name)
                 if header_row_index is None:
-                    print(f"Attenzione: Riga di intestazione non trovata nel foglio '{sheet_name}'. Saltato.")
+                    if progress_container is not None:
+                        progress_container.append(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet_name}'. Saltato.")
                     continue
 
+                # Legge il DataFrame con l'intestazione corretta
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row_index)
+
+                # Trova la colonna del giudizio
+                giudizio_col = find_giudizio_column(df)
+                if giudizio_col is None:
+                    if progress_container is not None:
+                        progress_container.append(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet_name}'. Saltato.")
+                    continue
                 
-                # Trova le colonne "input" e "target"
+                # Trova la colonna "input"
                 input_col = None
-                giudizio_col = None
                 for col in df.columns:
-                    if isinstance(col, str):
-                        if re.search(r'(input|descrizione|commento|testo)', col, re.IGNORECASE):
-                            input_col = col
-                        if re.search(r'(giudizio|giudizi|output)', col, re.IGNORECASE):
-                            giudizio_col = col
+                    if isinstance(col, str) and re.search(r'(input|descrizione|commento|testo)', col, re.IGNORECASE):
+                        input_col = col
+                        break
                 
-                if input_col and giudizio_col:
-                    temp_df = df.rename(columns={input_col: 'input_text', giudizio_col: 'target_text'})
-                    temp_df = temp_df[['input_text', 'target_text']].dropna()
-                    
-                    if not temp_df.empty:
-                        all_data.append(temp_df)
-                else:
-                    print(f"Attenzione: Colonne 'input' o 'giudizio' non trovate nel foglio '{sheet_name}'. Saltato.")
-                    
+                if input_col is None:
+                    if progress_container is not None:
+                        progress_container.append("Colonna 'input' non trovata. La prima colonna verrà usata come prompt.")
+                    input_col = df.columns[0]
+                
+                data_for_dataset = []
+                # Itera sul DataFrame e crea un elenco di dizionari
+                for _, row in df.iterrows():
+                    prompt_text = str(row[input_col]) if pd.notna(row[input_col]) else ""
+                    target_text = str(row[giudizio_col]) if pd.notna(row[giudizio_col]) else ""
+
+                    # Aggiunge solo se c'è almeno un prompt valido
+                    if prompt_text:
+                        data_for_dataset.append({
+                            'input_text': prompt_text,
+                            'target_text': target_text
+                        })
+                
+                if not data_for_dataset:
+                    if progress_container is not None:
+                        progress_container.append(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet_name}'. Saltato.")
+                    continue
+                
+                corpus_list.extend(data_for_dataset)
+                
             except Exception as e:
-                print(f"Errore nella lettura del foglio '{sheet_name}': {e}")
+                if progress_container is not None:
+                    progress_container.append(f"Errore nella lettura del foglio '{sheet_name}': {e}")
+                    progress_container.append(traceback.format_exc())
                 
-        if not all_data:
-            print("Nessun dato valido trovato in tutti i fogli del file per l'addestramento.")
+        if not corpus_list:
+            if progress_container is not None:
+                progress_container.append("Nessun dato valido trovato in tutti i fogli del file.")
             return pd.DataFrame()
             
-        return pd.concat(all_data, ignore_index=True)
+        return pd.DataFrame(corpus_list)
 
     except Exception as e:
-        print(f"Errore nella lettura del file per l'addestramento: {e}")
-        print(traceback.format_exc())
+        if progress_container is not None:
+            progress_container.append(f"Errore nella lettura del file: {e}")
+            progress_container.append(traceback.format_exc())
         return pd.DataFrame()
 
-
-def prepare_dataframe_to_complete(file_path, sheet_name):
+def load_and_update_corpus(file_path, progress_container):
     """
-    Prepara un DataFrame da completare, individuando la colonna 'Giudizio'.
+    Carica un corpus esistente o ne crea uno nuovo, lo aggiorna con i dati
+    del file Excel appena caricato e lo salva.
 
     Args:
-        file_path (BytesIO): Il file Excel caricato in memoria.
-        sheet_name (str): Il nome del foglio di lavoro.
+        file_path (BytesIO): Il file Excel caricato.
+        progress_container (list): La lista dei messaggi di stato di Streamlit.
 
     Returns:
-        tuple: (DataFrame da completare, nome della colonna 'Giudizio') o (None, None).
+        pd.DataFrame: Il DataFrame del corpus aggiornato.
     """
+    CORPUS_FILE = "training_corpus.parquet"
+    corpus_df = pd.DataFrame()
+
     try:
-        file_path.seek(0)
-        
-        # Cerca la riga di intestazione
-        header_row_index = find_header_row(file_path, sheet_name)
-        if header_row_index is None:
-            return None, None
+        if os.path.exists(CORPUS_FILE):
+            progress_container.append("Corpus esistente trovato. Caricamento in corso...")
+            corpus_df = pd.read_parquet(CORPUS_FILE)
+            progress_container.append(f"Corpus caricato. Totale righe: {len(corpus_df)}")
+        else:
+            progress_container.append("Nessun corpus esistente trovato. Verrà creato uno nuovo.")
 
-        # Legge il DataFrame con l'intestazione corretta
-        df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row_index)
+        progress_container.append("Lettura del nuovo file di addestramento...")
+        new_df = read_excel_file_to_df(file_path, progress_container)
 
-        # Trova la colonna del giudizio
-        giudizio_col = find_giudizio_column(df)
-        if giudizio_col is None:
-            return None, None
-            
-        # Trova la colonna "input" per il prompt. Cerca tra le possibili
-        # intestazioni "descrizione", "commento", "input", "testo".
-        input_col = None
-        for col in df.columns:
-            if isinstance(col, str) and re.search(r'(input|descrizione|commento|testo)', col, re.IGNORECASE):
-                input_col = col
-                break
-        
-        if input_col is None:
-            print("Colonna 'input' non trovata. La prima colonna verrà usata come prompt.")
-            input_col = df.columns[0]
-            
-        # Ritorna il DataFrame e il nome della colonna del giudizio
-        return df, giudizio_col
-        
+        if not new_df.empty:
+            progress_container.append(f"Trovate {len(new_df)} nuove righe da aggiungere.")
+            corpus_df = pd.concat([corpus_df, new_df], ignore_index=True)
+            corpus_df.drop_duplicates(inplace=True)
+            progress_container.append(f"Corpus aggiornato. Totale righe: {len(corpus_df)}")
+            corpus_df.to_parquet(CORPUS_FILE, index=False)
+            progress_container.append("Corpus salvato con successo.")
+        else:
+            progress_container.append("Nessun dato valido nel nuovo file. Il corpus non è stato aggiornato.")
+
+        return corpus_df
+
     except Exception as e:
-        print(f"Errore nella preparazione del DataFrame: {e}")
-        print(traceback.format_exc())
-        return None, None
+        progress_container.append(f"Errore durante l'aggiornamento del corpus: {e}")
+        progress_container.append(traceback.format_exc())
+        return pd.DataFrame()
+
+def delete_corpus(progress_container):
+    """
+    Elimina il file del corpus di addestramento.
+    """
+    CORPUS_FILE = "training_corpus.parquet"
+    if os.path.exists(CORPUS_FILE):
+        os.remove(CORPUS_FILE)
+        progress_container.append("Corpus di addestramento eliminato con successo.")
+    else:
+        progress_container.append("Nessun corpus di addestramento da eliminare.")
+
