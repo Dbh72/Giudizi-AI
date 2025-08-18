@@ -1,0 +1,7 @@
+streamlit
+pandas
+openpyxl
+datasets
+transformers
+peft
+torch
