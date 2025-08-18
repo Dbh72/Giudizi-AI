@@ -15,15 +15,64 @@ import pandas as pd
 import traceback
 from datetime import datetime
 import json
+import time
 
 # Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
 
 # ==============================================================================
-# SEZIONE 2: FUNZIONI PER LA GENERAZIONE
+# SEZIONE 2: FUNZIONI AUSILIARIE PER LA GENERAZIONE
 # ==============================================================================
 
-def generate_judgments_for_excel(model, tokenizer, df_to_complete, giudizio_col, selected_sheet, output_dir):
+def _process_text_in_chunks(model, tokenizer, input_text, max_length=512, chunk_overlap=50):
+    """
+    Processa un testo di input troppo lungo suddividendolo in chunk e generando
+    una risposta per ogni chunk, poi riassembla le risposte.
+
+    Args:
+        model (PeftModel): Il modello fine-tuned.
+        tokenizer (AutoTokenizer): Il tokenizer del modello.
+        input_text (str): Il testo di input da elaborare.
+        max_length (int): La lunghezza massima di input per il modello.
+        chunk_overlap (int): La sovrapposizione tra i chunk.
+
+    Returns:
+        str: Il testo del giudizio generato.
+    """
+    input_tokens = tokenizer(
+        input_text,
+        max_length=max_length,
+        truncation=True,
+        return_overflowing_tokens=True,
+        stride=chunk_overlap,
+        padding="max_length"
+    )
+    
+    generated_chunks = []
+    
+    # Processa ogni chunk e concatena i risultati
+    for chunk_id in input_tokens['input_ids']:
+        chunk_text = tokenizer.decode(chunk_id, skip_special_tokens=True)
+        # Genera un giudizio per il singolo chunk
+        input_ids = tokenizer(
+            chunk_text,
+            return_tensors="pt"
+        ).input_ids.to(model.device)
+        
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids,
+                max_length=150,
+                num_beams=4,
+                early_stopping=True
+            )
+        
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_chunks.append(generated_text)
+        
+    return " ".join(generated_chunks)
+
+def generate_judgments_for_excel(model, tokenizer, df_to_complete, giudizio_col, selected_sheet, progress_container, output_dir):
     """
     Genera i giudizi per un DataFrame, aggiungendo la logica di resumibilità e checkpoint.
 
@@ -32,99 +81,78 @@ def generate_judgments_for_excel(model, tokenizer, df_to_complete, giudizio_col,
         tokenizer (AutoTokenizer): Il tokenizer del modello.
         df_to_complete (pd.DataFrame): Il DataFrame da completare.
         giudizio_col (str): Il nome della colonna 'Giudizio'.
-        selected_sheet (str): Il nome del foglio di lavoro.
-        output_dir (str): La directory dove salvare lo stato del processo.
+        selected_sheet (str): Il nome del foglio di lavoro selezionato.
+        progress_container (gr.Textbox): Componente Gradio per i messaggi di stato.
+        output_dir (str): Directory del modello fine-tuned.
 
     Returns:
-        pd.DataFrame: Il DataFrame completato.
+        pd.DataFrame: Il DataFrame completato con i giudizi.
     """
-    print("Avvio della generazione dei giudizi...")
+    state_file = f"state_gen_{selected_sheet}.json"
     
-    # Aggiungi una colonna temporanea per lo stato
-    df_to_complete['generation_status'] = 'Pending'
-    
-    state_file = os.path.join(output_dir, f'progress_state_{selected_sheet}.json')
-    last_processed_index = -1
-    
-    # Carica lo stato precedente se esiste
+    # Inizializza o carica lo stato del processo
     if os.path.exists(state_file):
-        try:
-            with open(state_file, 'r') as f:
-                state = json.load(f)
-                last_processed_index = state.get('last_processed_index', -1)
-            
-            print(f"Trovato stato precedente. Riprendo dalla riga {last_processed_index + 1}.")
-            
-            # Carica il DataFrame salvato se esiste
-            last_df_path = state.get('last_df_path')
-            if last_df_path and os.path.exists(last_df_path):
-                df_to_complete = pd.read_csv(last_df_path)
-            
-        except Exception as e:
-            print(f"Errore nel caricamento dello stato, riavvio da zero: {e}")
-            os.remove(state_file)
-            
-    # Iteriamo sulle righe per generare i giudizi
+        with open(state_file, 'r') as f:
+            state = json.load(f)
+            last_completed_row = state.get("last_completed_row", -1)
+            progress_container.append(f"Trovato uno stato precedente. Riprendo dalla riga {last_completed_row + 2}...")
+            # Aggiungiamo una colonna di stato per tracciare le righe elaborate
+            df_to_complete['generation_status'] = df_to_complete.index.map(lambda i: 'completed' if i <= last_completed_row else 'pending')
+    else:
+        last_completed_row = -1
+        state = {"last_completed_row": -1}
+        df_to_complete['generation_status'] = 'pending'
+    
+    # Iteriamo sul DataFrame, saltando le righe già completate
     for index, row in df_to_complete.iterrows():
-        # Saltiamo le righe già processate
-        if index <= last_processed_index:
-            print(f"Salto la riga {index}, già processata.")
+        # Saltiamo le righe con un giudizio già presente o già completate in una run precedente
+        if pd.notna(row[giudizio_col]) or df_to_complete.loc[index, 'generation_status'] == 'completed':
+            progress_container.append(f"Riga {index + 2}: Giudizio già presente. Saltato.")
             continue
-            
-        # Saltiamo la riga se la colonna Giudizio è già compilata
-        if pd.notna(row[giudizio_col]) and str(row[giudizio_col]).strip() != "":
-            print(f"Salto la riga {index}, il giudizio è già presente.")
-            df_to_complete.at[index, 'generation_status'] = 'Skipped (already exists)'
-            continue
-            
+        
+        progress_container.append(f"Riga {index + 2}: Generazione del giudizio in corso...")
+        
         try:
-            prompt_parts = []
-            for col, value in row.items():
-                if col != giudizio_col and pd.notna(value) and str(value).strip():
-                    prompt_parts.append(f"{col}: {str(value).strip()}")
+            # Crea il prompt combinando le informazioni della riga
+            prompt_text = "Giudizio: " + " ".join([str(v) for k, v in row.items() if k != giudizio_col and pd.notna(v)])
             
-            prompt_text = " ".join(prompt_parts)
-            
-            if not prompt_text:
-                print(f"Attenzione: Riga {index} vuota o non valida, salto la generazione.")
-                df_to_complete.at[index, 'generation_status'] = 'Skipped (empty row)'
-                continue
+            # Controlla la lunghezza del prompt e applica il chunking se necessario
+            max_model_length = 512 # Esempio di lunghezza massima, può variare
+            if len(tokenizer.encode(prompt_text, max_length=10000)) > max_model_length:
+                progress_container.append(f"Testo per la riga {index + 2} è troppo lungo. Applico la logica di chunking...")
+                generated_text = _process_text_in_chunks(model, tokenizer, prompt_text, max_length=max_model_length)
+            else:
+                # Caso di generazione standard
+                input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.to(model.device)
+                
+                with torch.no_grad():
+                    outputs = model.generate(
+                        input_ids,
+                        max_length=150,
+                        num_beams=4,
+                        early_stopping=True
+                    )
+                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-            # Tokenizzazione e generazione del testo
-            input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids
-            outputs = model.generate(input_ids)
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # Aggiorna il DataFrame con il giudizio generato
+            df_to_complete.loc[index, giudizio_col] = generated_text
             
-            # Assegnazione del giudizio generato
-            df_to_complete.at[index, giudizio_col] = generated_text
-            df_to_complete.at[index, 'generation_status'] = 'Completed'
-            print(f"Generato giudizio per la riga {index}.")
-            
-            # Salvataggio dello stato e del DataFrame ogni 50 righe (checkpoint)
-            if index % 50 == 0:
-                print(f"Checkpoint di generazione: salvataggio dello stato al passo {index}...")
-                temp_df_path = os.path.join(output_dir, f'temp_df_{selected_sheet}.csv')
-                df_to_complete.to_csv(temp_df_path, index=False)
-                state = {'last_processed_index': index, 'last_df_path': temp_df_path}
-                with open(state_file, 'w') as f:
-                    json.dump(state, f)
-
-        except Exception as e:
-            print(f"Errore durante la generazione per la riga {index}: {e}")
-            df_to_complete.at[index, 'generation_status'] = 'Error'
-            # Salvataggio dello stato per riprendere da qui
-            temp_df_path = os.path.join(output_dir, f'temp_df_{selected_sheet}.csv')
-            df_to_complete.to_csv(temp_df_path, index=False)
-            state = {'last_processed_index': index, 'last_df_path': temp_df_path}
+            # Aggiorna il file di stato con l'ultimo indice completato
+            state["last_completed_row"] = index
             with open(state_file, 'w') as f:
                 json.dump(state, f)
             
-            # Rimuoviamo la colonna di stato prima di restituire il DF
-            return df_to_complete.drop(columns=['generation_status'])
-            
-    # Rimuove la colonna di stato una volta completata la generazione
+            progress_container.append(f"Giudizio per la riga {index + 2} generato e salvato.")
+
+        except Exception as e:
+            error_message = f"Errore durante la generazione per la riga {index + 2}: {e}\n\nTraceback:\n{traceback.format_exc()}"
+            progress_container.append(error_message)
+            print(error_message)
+            # Continua con la riga successiva
+            continue
+    
+    # Rimuove la colonna di stato e il file di stato una volta completata la generazione
     print("Generazione completata con successo!")
-    # Rimuovi il file di stato una volta completato il processo
     if os.path.exists(state_file):
         os.remove(state_file)
     return df_to_complete.drop(columns=['generation_status'])
@@ -147,9 +175,9 @@ def load_trained_model(model_path):
         base_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
         model = PeftModel.from_pretrained(base_model, model_path)
         
-        print(f"Modello e tokenizer caricati con successo.")
+        print(f"Modello e tokenizer caricati con successo da: {model_path}")
         return model, tokenizer
     except Exception as e:
-        print(f"Errore durante il caricamento del modello: {e}")
+        print(f"Errore nel caricare il modello o il tokenizer: {e}")
         print(traceback.format_exc())
         return None, None
