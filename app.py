@@ -93,7 +93,7 @@ with st.expander("Carica file per l'addestramento e avvia il fine-tuning"):
             with st.spinner("Preparazione dei dati per il fine-tuning..."):
                 try:
                     # Chiamata al modulo per la preparazione dei dati
-                    corpus_df = load_and_prepare_excel(uploaded_files, find_giudizio_column)
+                    corpus_df = load_and_prepare_excel(uploaded_files)
                     
                     if not corpus_df.empty:
                         st.session_state.corpus_df = corpus_df
