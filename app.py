@@ -13,6 +13,9 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from transformers import TrainingArguments, Trainer, DataCollatorForSeq2Seq
 from peft import LoraConfig, get_peft_model, TaskType
 import torch
+import warnings
+
+warnings.filterwarnings("ignore")
 
 # Importiamo il modulo con la logica per la preparazione dei dati
 # Assicurati che 'excel_reader.py' si trovi nella stessa directory.
@@ -75,8 +78,18 @@ def fine_tune_model(corpus_df):
         
         dataset = Dataset.from_pandas(corpus_df)
         
+        # QUESTA È LA LOGICA DI CHUNKING E OVERFLOW:
+        # La funzione di tokenizzazione ora si occupa di troncare il testo.
         def tokenize_function(examples):
-            return tokenizer(examples['input_text'], text_target=examples['target_text'], max_length=512, truncation=True)
+            # Utilizziamo truncation=True per troncare gli input che superano
+            # la lunghezza massima del modello (generalmente 512 token per Flan-T5).
+            # Questo previene l'overflow e assicura che il testo rientri nel limite.
+            return tokenizer(
+                examples['input_text'],
+                text_target=examples['target_text'],
+                max_length=512,  # Limite massimo di token
+                truncation=True    # Tronca se l'input supera il limite
+            )
             
         tokenized_dataset = dataset.map(tokenize_function, batched=True)
         
