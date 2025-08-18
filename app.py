@@ -13,6 +13,7 @@ from io import BytesIO
 import traceback
 import openpyxl
 import warnings
+from datetime import datetime # HO AGGIUNTO QUESTA LINEA!
 
 # Importiamo i moduli con la logica per la preparazione dei dati, l'addestramento e la generazione.
 from excel_reader import load_and_prepare_excel, find_giudizio_column
