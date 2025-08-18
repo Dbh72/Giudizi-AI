@@ -12,19 +12,48 @@ import re
 # SEZIONE 2: FUNZIONI AUSILIARIE
 # ==============================================================================
 
-def find_giudizio_column(df):
+def find_giudizio_column(df, file_path, sheet_name):
     """
-    Trova la colonna 'Giudizio' nel DataFrame, cercando in modo case-insensitive.
-    Se non la trova, restituisce None.
-    """
-    # Lista di possibili nomi per la colonna 'Giudizio'.
-    giudizio_keywords = ['giudizio', 'giudizi']
+    Trova la colonna 'Giudizio' nel DataFrame, cercando prima nella cella H3
+    e poi in modo case-insensitive in tutte le intestazioni.
     
-    # Cerca la colonna in modo case-insensitive.
+    Args:
+        df (pd.DataFrame): Il DataFrame del foglio da analizzare.
+        file_path (str): Il percorso del file Excel.
+        sheet_name (str): Il nome del foglio di lavoro.
+
+    Returns:
+        str: Il nome della colonna 'Giudizio' o None se non trovata.
+    """
+    try:
+        # Usa openpyxl per leggere la cella H3 (row=3, column=8)
+        workbook = openpyxl.load_workbook(file_path, data_only=True)
+        sheet = workbook[sheet_name]
+        h3_value = sheet.cell(row=3, column=8).value
+        
+        # Cerca la parola 'giudizio' nella cella H3 e verifica che sia una colonna valida.
+        if h3_value and 'giudizio' in str(h3_value).lower():
+            # Cerca la colonna corrispondente al valore della cella H3
+            # L'errore era qui: ora verifico che il valore di H3 sia una delle intestazioni del DataFrame.
+            for col in df.columns:
+                if str(col).lower() == str(h3_value).lower():
+                    print(f"Colonna 'Giudizio' trovata in H3: '{col}'")
+                    return col
+
+    except Exception as e:
+        # Se c'è un errore nella lettura della cella H3, procedi con la ricerca generica.
+        print(f"Errore nella lettura della cella H3. Proseguo con la ricerca generica. Errore: {e}")
+        pass
+
+    # Logica di fallback: cerca in tutte le intestazioni in modo case-insensitive
+    giudizio_keywords = ['giudizio', 'giudizi']
     for col in df.columns:
         for keyword in giudizio_keywords:
             if keyword in str(col).lower():
+                print(f"Colonna 'Giudizio' trovata con ricerca generica: '{col}'")
                 return col
+    
+    print("La colonna 'Giudizio' non è stata trovata.")
     return None
 
 # ==============================================================================
@@ -80,7 +109,7 @@ def load_and_prepare_excel(file_path):
             df_sheet.dropna(how='all', inplace=True)
 
             # Trova la colonna 'Giudizio'
-            giudizio_col = find_giudizio_column(df_sheet)
+            giudizio_col = find_giudizio_column(df_sheet, file_path, sheet_name)
             if not giudizio_col:
                 print(f"Attenzione: La colonna 'Giudizio' non è stata trovata nel foglio '{sheet_name}'. Saltato.")
                 continue
@@ -94,7 +123,6 @@ def load_and_prepare_excel(file_path):
                 prompt_parts = []
                 for col in other_cols:
                     value = row.get(col)
-                    # Verifica che il valore non sia vuoto, il problema era qui
                     if pd.notna(value) and str(value).strip():
                         prompt_parts.append(f"{col}: {str(value).strip()}")
                 
