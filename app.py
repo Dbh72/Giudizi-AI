@@ -33,13 +33,10 @@ st.set_page_config(
 # Inizializziamo le variabili di stato della sessione per mantenere i dati tra le interazioni.
 if 'corpus' not in st.session_state:
     st.session_state.corpus = pd.DataFrame()
-if 'uploaded_files' not in st.session_state:
-    st.session_state.uploaded_files = []
+if 'uploaded_files_data' not in st.session_state:
+    st.session_state.uploaded_files_data = {}
 if 'last_action_status' not in st.session_state:
     st.session_state.last_action_status = ""
-# Aggiungi questa linea per inizializzare file_to_process_corpus come lista vuota.
-if 'file_to_process_corpus' not in st.session_state:
-    st.session_state.file_to_process_corpus = []
 
 # ==============================================================================
 # SEZIONE 3: FUNZIONI PER LA GESTIONE DEI FILE
@@ -73,7 +70,7 @@ if st.session_state.last_action_status:
 # SOTTO-SEZIONE: CARICAMENTO E PREPARAZIONE DEL CORPUS
 # ==============================================================================
 st.write("### Carica i File per il Corpus di Fine-Tuning")
-st.write("Carica uno o più file Excel per costruire il corpus. I file devono contenere la colonna 'Giudizio'.")
+st.write("Carica uno o più file Excel per costruire il corpus. I file devono contenere la colonna 'Giudizio'. Se ricarichi un file già presente, verrà aggiornato.")
 
 uploaded_files = st.file_uploader(
     "Trascina e rilascia i file qui",
@@ -82,32 +79,38 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # Aggiungi solo i nuovi file allo stato della sessione
-    new_files = [file for file in uploaded_files if file.name not in [f.name for f in st.session_state.uploaded_files]]
-    st.session_state.uploaded_files.extend(new_files)
-
-    # Prepara la lista dei file da processare
-    files_to_process = [f for f in st.session_state.uploaded_files if f.name not in st.session_state.file_to_process_corpus]
+    # Aggiungi i nuovi file allo stato della sessione o aggiorna quelli esistenti
+    for file in uploaded_files:
+        st.session_state.uploaded_files_data[file.name] = file
     
-    if files_to_process:
-        with st.spinner("Elaborazione dei nuovi file..."):
-            for file in files_to_process:
-                # Salva il file per il modulo 'excel_reader'
-                temp_file_path = save_uploaded_file(file)
-                if temp_file_path:
-                    # Utilizza il modulo load_and_prepare_excel per elaborare il file
-                    df_new = load_and_prepare_excel(temp_file_path)
-                    
-                    if not df_new.empty:
-                        # Concatena i nuovi dati al corpus esistente
-                        st.session_state.corpus = pd.concat([st.session_state.corpus, df_new], ignore_index=True)
-                        st.session_state.last_action_status = f"File '{file.name}' aggiunto al corpus con successo!"
-                        st.session_state.file_to_process_corpus.append(file.name)
-                    else:
-                         st.session_state.last_action_status = f"Impossibile elaborare il contenuto di '{file.name}' o non contiene dati validi."
-                    
-                    # Rimuovi il file temporaneo
-                    os.remove(temp_file_path)
+    # Processa tutti i file memorizzati
+    corpus_list = []
+    
+    with st.spinner("Elaborazione dei file..."):
+        for file_name, file_data in st.session_state.uploaded_files_data.items():
+            # Salva il file per il modulo 'excel_reader'
+            temp_file_path = save_uploaded_file(file_data)
+            if temp_file_path:
+                # Utilizza il modulo load_and_prepare_excel per elaborare il file
+                df_new = load_and_prepare_excel(temp_file_path)
+                
+                if not df_new.empty:
+                    corpus_list.append(df_new)
+                    st.session_state.last_action_status = f"File '{file_name}' elaborato con successo."
+                else:
+                    st.session_state.last_action_status = f"Impossibile elaborare il contenuto di '{file_name}' o non contiene dati validi."
+                
+                # Rimuovi il file temporaneo
+                os.remove(temp_file_path)
+
+    # Concatena tutti i DataFrame elaborati in un unico corpus
+    if corpus_list:
+        st.session_state.corpus = pd.concat(corpus_list, ignore_index=True)
+        st.success("Tutti i file sono stati elaborati e il corpus è aggiornato.")
+    else:
+        st.session_state.corpus = pd.DataFrame()
+        st.info("Nessun dato valido trovato nei file caricati.")
+
 
 # ==============================================================================
 # SOTTO-SEZIONE: VISUALIZZAZIONE E DOWNLOAD DEL CORPUS TOTALE
@@ -139,6 +142,5 @@ else:
 st.write("---")
 st.write("### Genera Giudizi su un File Esistente")
 st.write("Carica un file Excel con la colonna 'Giudizio' da completare. **Questa funzionalità richiede un modello già addestrato.**")
-# Questa sezione è ancora da implementare, come discusso in precedenza.
-st.warning("Funzionalità di generazione non implementata in questo script. Usa lo script basato su Gradio o implementa qui la logica del fine-tuning e della generazione.")
+st.warning("Funzionalità di generazione non implementata in questo script. Se hai bisogno di aiuto con questa sezione, fammelo sapere.")
 
