@@ -38,69 +38,69 @@ def find_header_row(file_path, sheet_name):
         sheet_name (str): Il nome del foglio di lavoro.
 
     Returns:
-        int: L'indice di riga dell'intestazione (basato su 0) o None se non trovata.
+        int: L'indice della riga dell'intestazione (0-based) o None se non trovata.
     """
     try:
-        # Carica il file in modalità di sola lettura per trovare l'intestazione
-        file_path.seek(0)
-        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-        sheet = workbook[sheet_name]
-        
-        # Scansione delle prime 20 righe per trovare 'Giudizio'
-        for row_idx, row in enumerate(sheet.iter_rows(min_row=1, max_row=20)):
-            for cell in row:
-                if isinstance(cell.value, str) and re.search(r'giudizio', str(cell.value).strip(), re.IGNORECASE):
-                    return row_idx  # Restituisce l'indice di riga
-        return None
-    except Exception as e:
-        print(f"Errore nella ricerca dell'intestazione in '{sheet_name}': {e}")
-        return None
+        wb = openpyxl.load_workbook(file_path, read_only=True)
+        ws = wb[sheet_name]
 
-def load_and_prepare_excel(file_data):
+        for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=10)):
+            for cell in row:
+                if cell.value and isinstance(cell.value, str) and re.search(r'giudizio', cell.value, re.IGNORECASE):
+                    wb.close()
+                    return row_idx
+        wb.close()
+    except Exception:
+        # Ignora gli errori di lettura e continua a cercare
+        pass
+    return None
+
+def load_and_prepare_excel(file_data, file_name):
     """
-    Legge un file Excel (in memoria) e prepara il corpus.
+    Legge i dati da uno o più fogli di un file Excel e li prepara
+    per il fine-tuning del modello.
+
+    Crea un corpus combinando 'input_text' e 'target_text' da ogni riga
+    di tutti i fogli di lavoro.
 
     Args:
         file_data (BytesIO): Il file Excel caricato in memoria.
+        file_name (str): Il nome del file Excel.
 
     Returns:
-        pd.DataFrame: Il corpus dei dati pronti per il fine-tuning.
+        pd.DataFrame: Un DataFrame combinato con le colonne 'input_text' e 'target_text'.
+                      Restituisce un DataFrame vuoto in caso di errore o se non trova dati validi.
     """
     corpus_list = []
     
     try:
-        # Carica il file Excel in memoria
-        file_data.seek(0)
         xls = pd.ExcelFile(file_data)
         sheet_names = xls.sheet_names
-
+        
         for sheet_name in sheet_names:
             try:
-                # Cerca l'indice della riga di intestazione
-                header_row_index = find_header_row(BytesIO(file_data.getvalue()), sheet_name)
+                header_row = find_header_row(BytesIO(file_data.getvalue()), sheet_name)
                 
-                if header_row_index is None:
-                    print(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet_name}'. Saltato.")
+                if header_row is None:
+                    print(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet_name}' del file '{file_name}'. Saltato.")
                     continue
-
-                # Legge il foglio a partire dalla riga di intestazione trovata
-                df_sheet = pd.read_excel(BytesIO(file_data.getvalue()), sheet_name=sheet_name, header=header_row_index)
                 
-                # Trova la colonna 'Giudizio' (case-insensitive)
+                df_sheet = pd.read_excel(file_data, sheet_name=sheet_name, header=header_row)
+                
                 giudizio_col = find_giudizio_column(df_sheet)
                 
                 if giudizio_col is None:
-                    print(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet_name}'. Saltato.")
+                    print(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet_name}' del file '{file_name}'. Saltato.")
                     continue
-
-                # Filtra le altre colonne che non sono 'Giudizio'
-                other_cols = [col for col in df_sheet.columns if col != giudizio_col and pd.notna(col) and str(col).strip()]
                 
-                # Prepara la lista di dizionari per la creazione del dataset
+                other_cols = [col for col in df_sheet.columns if col != giudizio_col]
+                df_sheet.dropna(how='all', subset=other_cols, inplace=True)
+                df_sheet.reset_index(drop=True, inplace=True)
+                
                 data_for_dataset = []
                 for index, row in df_sheet.iterrows():
-                    # Ignora le righe che non contengono alcun prompt valido
-                    if all(pd.isna(row.get(col)) for col in other_cols):
+                    # Salta la riga se la colonna 'Giudizio' è vuota e non ci sono altri dati
+                    if pd.isna(row[giudizio_col]) and all(pd.isna(row[col]) for col in other_cols):
                         continue
 
                     prompt_parts = []
@@ -120,20 +120,20 @@ def load_and_prepare_excel(file_data):
                         })
                 
                 if not data_for_dataset:
-                    print(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet_name}'. Saltato.")
+                    print(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet_name}' del file '{file_name}'. Saltato.")
                     continue
                 
                 corpus_list.extend(data_for_dataset)
                 
             except Exception as e:
-                print(f"Errore nella lettura del foglio '{sheet_name}': {e}")
+                print(f"Errore nella lettura del foglio '{sheet_name}' del file '{file_name}': {e}")
                 
         if not corpus_list:
-            print("Nessun dato valido trovato in tutti i fogli del file.")
+            print(f"Nessun dato valido trovato in tutti i foghi del file '{file_name}'.")
             return pd.DataFrame()
             
         return pd.DataFrame(corpus_list)
 
     except Exception as e:
-        print(f"Errore nella lettura del file: {e}")
+        print(f"Errore nella lettura del file '{file_name}': {e}")
         return pd.DataFrame()
