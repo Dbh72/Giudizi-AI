@@ -37,109 +37,124 @@ def save_uploaded_file(uploaded_file):
 # ==============================================================================
 # SEZIONE 3: INIZIALIZZAZIONE DELLO STATO DELLA SESSIONE
 # ==============================================================================
-# Inizializziamo le variabili di stato della sessione per mantenere i dati
-# e lo stato dell'applicazione attraverso i rerun di Streamlit.
+# Inizializza le variabili di stato della sessione per mantenere i dati tra i rerun.
 if 'excel_files' not in st.session_state:
     st.session_state.excel_files = []
 if 'last_action_status' not in st.session_state:
     st.session_state.last_action_status = ""
+if 'corpus' not in st.session_state:
+    st.session_state.corpus = pd.DataFrame()
 if 'excel_content_history' not in st.session_state:
     st.session_state.excel_content_history = {}
-if 'corpus' not in st.session_state:
-    st.session_state.corpus = pd.DataFrame() # Inizializziamo il corpus come un DataFrame vuoto
+if 'file_to_process' not in st.session_state:
+    st.session_state.file_to_process = None
 
 # ==============================================================================
 # SEZIONE 4: INTERFACCIA UTENTE
 # ==============================================================================
-st.set_page_config(page_title="Giudizi-AI", layout="wide")
 
-st.title("🤖 Giudizi-AI: Preparazione del Corpus di Dati")
-st.markdown("Carica i tuoi file Excel per creare un corpus di dati unificato per il fine-tuning.")
-st.write("---")
+# Titolo e descrizione dell'app.
+st.title("Giudizi-AI: Preparazione del Corpus per il Fine-Tuning")
+st.markdown("""
+Questa applicazione ti aiuta a preparare i tuoi dati in formato Excel
+per il fine-tuning di un modello di linguaggio che genererà giudizi
+per le valutazioni.
+""")
 
-# Area per il caricamento dei file
+# Componente per il caricamento dei file.
+# L'utente può caricare uno o più file Excel.
 uploaded_files = st.file_uploader(
-    "Carica i tuoi file Excel",
-    type=['xlsx', 'xls', 'xlsm'],
+    "Carica uno o più file Excel (xlsx, xls, xlsm)",
+    type=["xlsx", "xls", "xlsm"],
     accept_multiple_files=True
 )
 
+# Gestisce il caricamento dei file.
 if uploaded_files:
     for uploaded_file in uploaded_files:
-        # Aggiungiamo i file caricati allo stato della sessione, evitando duplicati
-        if uploaded_file not in st.session_state.excel_files:
+        # Aggiunge il file alla lista se non è già presente.
+        if uploaded_file.name not in [f.name for f in st.session_state.excel_files]:
             st.session_state.excel_files.append(uploaded_file)
-
-# Mostriamo lo stato attuale e i file caricati
-if st.session_state.last_action_status:
-    st.info(st.session_state.last_action_status)
-
-if st.session_state.excel_files:
-    st.write("### File Excel Caricati")
-    file_names = [f.name for f in st.session_state.excel_files]
-    selected_file_name = st.selectbox("Seleziona un file da elaborare:", file_names)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        process_button = st.button(f"Elabora {selected_file_name}")
-    with col2:
-        if st.button("Elimina file selezionato"):
-            file_to_remove = next((f for f in st.session_state.excel_files if f.name == selected_file_name), None)
-            if file_to_remove:
-                st.session_state.excel_files.remove(file_to_remove)
-                st.session_state.last_action_status = f"File {selected_file_name} eliminato con successo."
-                # Rimuoviamo il file dal corpus e dalla storia dei contenuti se esiste
-                if selected_file_name in st.session_state.excel_content_history:
-                    del st.session_state.excel_content_history[selected_file_name]
-                if selected_file_name in st.session_state.corpus.index:
-                    st.session_state.corpus.drop(selected_file_name, inplace=True)
+            st.session_state.last_action_status = f"File '{uploaded_file.name}' caricato con successo!"
+            # Imposta la variabile per l'elaborazione al prossimo rerun.
+            st.session_state.file_to_process = uploaded_file.name
             st.rerun()
-
-    if process_button:
-        st.session_state.file_to_process = selected_file_name
-        st.rerun()
 
 st.write("---")
 
+# Mostra lo stato dell'ultima azione.
+if st.session_state.last_action_status:
+    st.info(st.session_state.last_action_status)
+
+# Mostra la lista dei file caricati e offre la possibilità di rimuoverli.
+st.write("### File Caricati:")
+if st.session_state.excel_files:
+    for idx, f in enumerate(st.session_state.excel_files):
+        col1, col2 = st.columns([0.8, 0.2])
+        with col1:
+            st.write(f"- {f.name}")
+        with col2:
+            # Pulsante per rimuovere un file dalla lista.
+            if st.button("Rimuovi", key=f"remove_file_{idx}"):
+                st.session_state.excel_files.pop(idx)
+                # Rimuove anche i dati dal corpus e dalla history.
+                if f.name in st.session_state.corpus:
+                    st.session_state.corpus = st.session_state.corpus.drop(
+                        st.session_state.corpus[st.session_state.corpus.iloc[:, 0] == f.name].index
+                    )
+                st.session_state.excel_content_history.pop(f.name, None)
+                st.session_state.last_action_status = f"File '{f.name}' rimosso."
+                st.rerun()
+else:
+    st.write("Nessun file caricato.")
+
+st.write("---")
+
+# ==============================================================================
 # SEZIONE: LOGICA DI ELABORAZIONE (DOPO IL RERUN)
-# Questa sezione viene eseguita solo se un file è stato selezionato per l'elaborazione.
-if "file_to_process" in st.session_state:
+# ==============================================================================
+if "file_to_process" in st.session_state and st.session_state.file_to_process:
     file_to_process_name = st.session_state["file_to_process"]
+    # Trova il file caricato tra quelli nella sessione.
     uploaded_file = next((f for f in st.session_state.excel_files if f.name == file_to_process_name), None)
 
     if uploaded_file:
         with st.spinner(f"Elaborazione di {uploaded_file.name}..."):
             try:
-                # Chiamiamo la funzione per leggere l'Excel e preparare i dati.
-                # Questa funzione gestirà il troncamento delle righe/colonne e la pulizia dei dati.
+                # Salva il file su disco per permettere al reader di accedervi.
                 file_path = save_uploaded_file(uploaded_file)
+                # Chiama la funzione per leggere l'Excel e preparare i dati.
                 extracted_content = load_and_prepare_excel(file_path)
-
-                if extracted_content is not None and not extracted_content.empty:
-                    # Uniamo i dati del file elaborato al corpus generale.
-                    # pd.concat si occupa di unire i DataFrame in un unico corpus.
-                    st.session_state.corpus = pd.concat([st.session_state.corpus, extracted_content], ignore_index=True)
-                    st.session_state.excel_content_history[uploaded_file.name] = extracted_content
-                    st.session_state.last_action_status = f"Contenuto di {uploaded_file.name} elaborato e aggiunto al corpus con successo!"
+                
+                if not extracted_content.empty:
+                    # Se il corpus è vuoto, inizializzalo con il primo file.
+                    if st.session_state.corpus.empty:
+                        st.session_state.corpus = extracted_content
+                    else:
+                        # Altrimenti, aggiungi i nuovi dati.
+                        st.session_state.corpus = pd.concat([st.session_state.corpus, extracted_content], ignore_index=True)
                     
+                    st.session_state.excel_content_history[uploaded_file.name] = extracted_content
+                    st.session_state.last_action_status = f"Contenuto di '{uploaded_file.name}' elaborato e aggiunto al corpus."
                 else:
-                     st.session_state.last_action_status = f"Impossibile elaborare il contenuto di {uploaded_file.name} o non contiene dati validi."
+                    st.session_state.last_action_status = f"Impossibile elaborare il contenuto di '{uploaded_file.name}' o non contiene dati validi."
             except Exception as e:
-                st.session_state.last_action_status = f"Errore nell'elaborazione di {uploaded_file.name}: {e}"
-        
-        # Rimuove la variabile di stato per evitare una riesecuzione involontaria
-        del st.session_state.file_to_process
-        st.rerun()
+                st.session_state.last_action_status = f"Errore nell'elaborazione di '{uploaded_file.name}': {e}"
+    
+    # Rimuove la variabile di stato per evitare una riesecuzione involontaria.
+    del st.session_state.file_to_process
+    st.rerun()
 
+# ==============================================================================
 # SEZIONE: VISUALIZZAZIONE E DOWNLOAD DEL CORPUS TOTALE
-# Mostriamo il DataFrame con l'intero corpus unificato e permettiamo di scaricarlo.
+# ==============================================================================
 st.write("---")
 st.write("### Corpus Totale per il Fine-Tuning")
 if not st.session_state.corpus.empty:
     st.dataframe(st.session_state.corpus)
     st.success(f"Il corpus totale contiene {len(st.session_state.corpus)} righe pronte per l'addestramento.")
     
-    # Prepara il file in memoria per il download
+    # Prepara il file in memoria per il download.
     corpus_buffer = BytesIO()
     with pd.ExcelWriter(corpus_buffer, engine='openpyxl') as writer:
         st.session_state.corpus.to_excel(writer, index=False, sheet_name='Corpus Totale')
@@ -148,8 +163,8 @@ if not st.session_state.corpus.empty:
     st.download_button(
         label="Scarica il Corpus Totale",
         data=corpus_buffer,
-        file_name="corpus_totale.xlsx",
+        file_name="corpus_fine_tuning.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 else:
-    st.info("Carica ed elabora i file per creare il corpus.")
+    st.info("Carica i file Excel per iniziare a costruire il corpus.")
