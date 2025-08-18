@@ -9,7 +9,8 @@ from io import BytesIO
 import traceback
 import openpyxl
 from datasets import Dataset
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, TrainingArguments, Trainer, DataCollatorForSeq2Seq
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import TrainingArguments, Trainer, DataCollatorForSeq2Seq
 from peft import LoraConfig, get_peft_model, TaskType
 import torch
 
@@ -167,7 +168,8 @@ with st.expander("📂 Prepara Corpus per Fine-Tuning", expanded=True):
             
             full_corpus_list = []
             for file_name, file_data in st.session_state.uploaded_files_data.items():
-                df = load_and_prepare_excel(BytesIO(file_data))
+                # Chiamata alla funzione aggiornata con il nome del file
+                df = load_and_prepare_excel(BytesIO(file_data), file_name)
                 full_corpus_list.append(df)
             
             if full_corpus_list and not all(df.empty for df in full_corpus_list):
