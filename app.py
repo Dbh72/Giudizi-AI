@@ -21,10 +21,7 @@ import traceback
 from datetime import datetime
 from io import BytesIO
 import json
-from datasets import Dataset, DatasetDict
-import re
 import time
-import sys
 
 # Importa i moduli personalizzati
 import excel_reader as er
@@ -41,16 +38,34 @@ warnings.filterwarnings("ignore")
 # ==============================================================================
 
 # Funzione per registrare i messaggi di stato.
-def progress_container(message, type="info"):
-    """Aggiunge un messaggio alla session state per la visualizzazione e forza il refresh."""
-    st.session_state.status_messages.append({"message": message, "type": type})
-    st.rerun()
+def progress_container(status_placeholder, message, type="info"):
+    """
+    Aggiorna un placeholder di Streamlit con i messaggi di stato.
+    Il placeholder è gestito nella sessione principale, evitando `st.rerun()`.
+    """
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    formatted_message = f"[{timestamp}] {message}"
+    
+    if 'status_log' not in st.session_state:
+        st.session_state.status_log = []
+        
+    st.session_state.status_log.append({"message": formatted_message, "type": type})
+    
+    # Crea un'area temporanea per visualizzare i messaggi aggiornati
+    with status_placeholder.container():
+        for log in st.session_state.status_log:
+            if log['type'] == "error":
+                st.error(log['message'])
+            elif log['type'] == "warning":
+                st.warning(log['message'])
+            else:
+                st.info(log['message'])
 
 # Funzione per inizializzare o caricare lo stato.
 def init_state():
     """Inizializza le variabili di sessione di Streamlit se non esistono."""
-    if "status_messages" not in st.session_state:
-        st.session_state.status_messages = []
+    if "status_log" not in st.session_state:
+        st.session_state.status_log = []
     if "corpus_df" not in st.session_state:
         st.session_state.corpus_df = pd.DataFrame()
     if "trained_model_exists" not in st.session_state:
@@ -61,45 +76,56 @@ def init_state():
         st.session_state.selected_sheet = None
 
 # Funzione per l'addestramento del modello.
-def train_model_and_save(train_file):
+def train_model_and_save(train_file, status_placeholder):
     """Gestisce il flusso di addestramento del modello."""
-    st.session_state.status_messages = [] # Pulisce i messaggi per un nuovo avvio
+    st.session_state.status_log = [] # Pulisce i messaggi per un nuovo avvio
+    progress = lambda msg, type="info": progress_container(status_placeholder, msg, type)
+    
     try:
-        # Usa er.get_excel_sheet_names per ottenere i nomi dei fogli
+        progress("Lettura del file di addestramento...")
         sheet_names = er.get_excel_sheet_names(train_file)
-        df = er.read_and_prepare_data_from_excel(train_file, sheet_names, progress_container)
-        st.session_state.corpus_df = cb.build_or_update_corpus(df, progress_container)
+        df = er.read_and_prepare_data_from_excel(train_file, sheet_names, progress)
+        
+        progress("Aggiornamento del corpus...")
+        st.session_state.corpus_df = cb.build_or_update_corpus(df, progress)
         
         if not st.session_state.corpus_df.empty:
-            mt.fine_tune_model(st.session_state.corpus_df, progress_container)
+            progress("Avvio del fine-tuning...")
+            mt.fine_tune_model(st.session_state.corpus_df, progress)
             st.session_state.trained_model_exists = True
+            progress("Addestramento completato con successo!", "success")
+        else:
+            progress("Corpus di addestramento vuoto. Addestramento annullato.", "warning")
+
     except Exception as e:
-        progress_container(f"Errore durante l'addestramento del modello: {e}", "error")
-        progress_container(f"Traceback: {traceback.format_exc()}", "error")
+        progress(f"Errore durante l'addestramento del modello: {e}", "error")
+        progress(f"Traceback: {traceback.format_exc()}", "error")
 
 # Funzione per la generazione dei giudizi.
-def generate_judgments_and_save(process_file, sheet_name):
+def generate_judgments_and_save(process_file, sheet_name, status_placeholder):
     """Gestisce il flusso di generazione dei giudizi."""
-    st.session_state.status_messages = [] # Pulisce i messaggi per un nuovo avvio
-    progress_container(f"Generazione dei giudizi per il foglio '{sheet_name}'...", "info")
+    st.session_state.status_log = [] # Pulisce i messaggi per un nuovo avvio
+    progress = lambda msg, type="info": progress_container(status_placeholder, msg, type)
+    progress(f"Generazione dei giudizi per il foglio '{sheet_name}'...", "info")
+    
     try:
-        model, tokenizer = jg.load_model(os.path.join(OUTPUT_DIR, "final_model"), progress_container)
+        model, tokenizer = jg.load_model(os.path.join(OUTPUT_DIR, "final_model"), progress)
         if model and tokenizer:
             processed_df = jg.generate_judgments_for_excel(
                 model=model,
                 tokenizer=tokenizer,
                 file_object=process_file,
                 sheet_name=sheet_name,
-                progress_container=progress_container
+                progress_container=progress
             )
             st.session_state.process_completed_file = processed_df
             st.session_state.selected_sheet = sheet_name
-            progress_container("Processo completato!", "success")
+            progress("Processo completato!", "success")
         else:
-            progress_container("Impossibile caricare il modello. Assicurati che il fine-tuning sia stato completato con successo.", "error")
+            progress("Impossibile caricare il modello. Assicurati che il fine-tuning sia stato completato con successo.", "error")
     except Exception as e:
-        progress_container(f"Errore durante la generazione dei giudizi: {e}", "error")
-        progress_container(f"Traceback: {traceback.format_exc()}", "error")
+        progress(f"Errore durante la generazione dei giudizi: {e}", "error")
+        progress(f"Traceback: {traceback.format_exc()}", "error")
 
 
 # ==============================================================================
@@ -120,20 +146,6 @@ st.markdown("---")
 
 init_state()
 
-# Cache the model loading to prevent it from reloading on every interaction.
-@st.cache_resource
-def load_cached_model():
-    """
-    Carica il modello e il tokenizer solo una volta per tutta la sessione.
-    """
-    if st.session_state.trained_model_exists:
-        try:
-            return jg.load_model(os.path.join(OUTPUT_DIR, "final_model"), progress_container)
-        except Exception as e:
-            progress_container(f"Errore nel caricamento del modello cache: {e}", "error")
-            return None, None
-    return None, None
-
 # Main Sections
 st.header("1. Addestramento del Modello")
 st.markdown("Carica qui un file Excel con i giudizi per addestrare il modello.")
@@ -149,9 +161,13 @@ uploaded_train_file = st.file_uploader(
     help="Seleziona il file Excel contenente i dati di addestramento."
 )
 
+# Placeholders per i messaggi di stato
+status_placeholder_train = st.empty()
+status_placeholder_generate = st.empty()
+
 if uploaded_train_file:
     if st.button("Avvia Addestramento"):
-        train_model_and_save(uploaded_train_file)
+        train_model_and_save(uploaded_train_file, status_placeholder_train)
 
 if st.session_state.trained_model_exists:
     st.success("Modello addestrato trovato e pronto all'uso!")
@@ -160,10 +176,10 @@ if st.session_state.trained_model_exists:
         if os.path.exists(OUTPUT_DIR):
             shutil.rmtree(OUTPUT_DIR)
             st.session_state.trained_model_exists = False
-            st.session_state.status_messages = []
+            st.session_state.status_log = []
             st.rerun()
         else:
-            progress_container("Nessun modello da eliminare.", "warning")
+            progress_container(status_placeholder_train, "Nessun modello da eliminare.", "warning")
 
 st.markdown("---")
 
@@ -187,9 +203,9 @@ if st.session_state.trained_model_exists:
             )
 
             if st.button("Avvia Generazione"):
-                generate_judgments_and_save(uploaded_process_file, selected_sheet)
+                generate_judgments_and_save(uploaded_process_file, selected_sheet, status_placeholder_generate)
         except Exception as e:
-            progress_container(f"Errore nel caricamento del file. Controlla il formato e riprova. {e}", "error")
+            progress_container(status_placeholder_generate, f"Errore nel caricamento del file. Controlla il formato e riprova. {e}", "error")
             st.error("Errore nel caricamento del file. Controlla il formato e riprova.")
 else:
     st.warning("Per generare i giudizi, devi prima addestrare un modello nella sezione '1. Addestramento del Modello'.")
@@ -200,15 +216,6 @@ else:
 st.markdown("---")
 st.header("3. Stato e Download")
 
-# Visualizza i messaggi di stato
-for message in st.session_state.status_messages:
-    if message['type'] == "error":
-        st.error(message['message'])
-    elif message['type'] == "warning":
-        st.warning(message['message'])
-    else:
-        st.info(message['message'])
-        
 if st.session_state.process_completed_file is not None:
     st.write("### Scarica il file completato")
     

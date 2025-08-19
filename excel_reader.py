@@ -1,7 +1,7 @@
 # ==============================================================================
-# File: excel_reader.py
-# Logica per la preparazione dei dati da file Excel.
-# Include tutte le funzioni necessarie per la lettura dei fogli e l'estrazione dei dati.
+# File: excel_reader_v2.py
+# Logica per la preparazione dei dati da file Excel, integrando le
+# funzionalità di '33 Funziona.txt' per una lettura più robusta.
 # ==============================================================================
 import pandas as pd
 import openpyxl
@@ -13,6 +13,7 @@ import shutil
 import json
 from datetime import datetime
 
+# ==============================================================================
 # SEZIONE 1: FUNZIONI AUSILIARIE
 # ==============================================================================
 
@@ -35,31 +36,23 @@ def make_columns_unique(columns):
 
 def find_header_row_and_columns(df):
     """
-    Trova la riga di intestazione e la colonna 'Giudizio' in un DataFrame.
+    Trova la riga di intestazione e le posizioni della colonna 'Giudizio'.
     """
     try:
         for i in range(min(50, len(df))):
-            row = df.iloc[i].astype(str)
-            header_found = False
-            giudizio_col = -1
-            
-            for j, col_name in enumerate(row):
-                if re.search(r'giudizio', str(col_name).lower()):
-                    giudizio_col = j
-                    header_found = True
-                    break
-            
-            if header_found:
-                df.columns = make_columns_unique(df.iloc[i].astype(str))
-                giudizio_col_name = df.columns[giudizio_col]
+            row = df.iloc[i].astype(str).str.lower()
+            if 'giudizio' in row.values:
+                header_row = df.iloc[i]
+                df.columns = make_columns_unique(header_row.values)
                 df = df.iloc[i+1:].reset_index(drop=True)
-                return df, giudizio_col_name
-        
-        return None, None
+                giudizio_col = next((col for col in df.columns if isinstance(col, str) and 'giudizio' in col.lower()), None)
+                return df, giudizio_col
+        return df, None
     except Exception as e:
-        return None, None
+        print(f"Errore nella ricerca dell'header: {e}")
+        return df, None
 
-def read_and_prepare_data_from_excel(file_path, sheet_names, progress_container):
+def read_and_prepare_data_from_excel(file_object, sheet_names, progress_container):
     """
     Legge un file Excel, ne estrae i dati, crea un corpus di addestramento
     e lo restituisce come DataFrame.
@@ -67,37 +60,29 @@ def read_and_prepare_data_from_excel(file_path, sheet_names, progress_container)
     corpus_list = []
     
     try:
-        progress_container(f"Lettura del file Excel: {file_path}", "info")
+        progress_container(f"Lettura del file Excel: {file_object.name}", "info")
         
         for sheet in sheet_names:
             progress_container(f"Elaborazione del foglio: '{sheet}'...", "info")
             if "prototipo" in sheet.lower() or "medie" in sheet.lower():
-                progress_container(f"Ignorando il foglio '{sheet}' (prototipo o medie).", "warning")
+                progress_container(f"Ignorando il foglio '{sheet}' (prototipo o medie). Saltato.", "warning")
                 continue
             
             try:
-                df = pd.read_excel(file_path, sheet_name=sheet, header=None)
+                file_object.seek(0) # Riporta il puntatore all'inizio del file per ogni foglio
+                df = pd.read_excel(file_object, sheet_name=sheet, header=None)
                 df, giudizio_col = find_header_row_and_columns(df)
-                
+
                 if giudizio_col is None:
                     progress_container(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet}'. Saltato.", "warning")
                     continue
-
-                ignored_columns = ['alunno', 'assenti', 'cnt', 'pos']
                 
-                input_columns = [
-                    col for col in df.columns 
-                    if not any(re.search(word, str(col).lower()) for word in ignored_columns) and col != giudizio_col
-                ]
-
+                # Prepara i dati per il dataset
                 data_for_dataset = []
-                for index, row in df.iterrows():
-                    if pd.isna(row[giudizio_col]) or str(row[giudizio_col]).strip() == "":
-                        continue
-                    
-                    input_data = row[input_columns].astype(str).to_dict()
+                for _, row in df.iterrows():
+                    input_data = row.drop(labels=[c for c in df.columns if isinstance(c, str) and ('giudizio' in c.lower() or 'alunno' in c.lower() or 'assenti' in c.lower() or 'cnt' in c.lower() or 'pos' in c.lower())], errors='ignore')
                     prompt_text = " ".join([f"{col}: {str(val)}" for col, val in input_data.items() if pd.notna(val) and str(val).strip() != ''])
-                    target_text = str(row[giudizio_col])
+                    target_text = str(row[giudizio_col]) if pd.notna(row[giudizio_col]) else ""
 
                     if prompt_text:
                         data_for_dataset.append({
@@ -127,12 +112,13 @@ def read_and_prepare_data_from_excel(file_path, sheet_names, progress_container)
         return pd.DataFrame()
 
 
-def get_excel_sheet_names(file_path):
+def get_excel_sheet_names(file_object):
     """
     Restituisce una lista con i nomi di tutti i fogli di lavoro in un file Excel.
     """
     try:
-        workbook = openpyxl.load_workbook(file_path, read_only=True)
+        file_object.seek(0) # Riporta il puntatore all'inizio del file
+        workbook = openpyxl.load_workbook(file_object, read_only=True)
         sheet_names = workbook.sheetnames
         workbook.close()
         return sheet_names
