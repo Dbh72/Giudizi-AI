@@ -127,10 +127,8 @@ def fine_tune_model(corpus_df, progress_container):
             report_to="none",
             save_strategy="steps",
             save_steps=500,
-            save_total_limit=3,
-            evaluation_strategy="steps",
             eval_steps=500,
-            load_best_model_at_end=True
+            save_total_limit=3,
         )
         
         # Cerca l'ultimo checkpoint salvato per riprendere l'addestramento
