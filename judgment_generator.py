@@ -16,7 +16,6 @@ from datetime import datetime
 import json
 import time
 from config import OUTPUT_DIR, MODEL_NAME
-from io import BytesIO
 
 # Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
@@ -40,86 +39,89 @@ def _process_text_in_chunks(model, tokenizer, input_text, max_length=512, chunk_
     Returns:
         str: Il testo della risposta generata.
     """
-    tokens = tokenizer.tokenize(input_text)
-    token_chunks = [tokens[i:i + max_length] for i in range(0, len(tokens), max_length - chunk_overlap)]
-    
-    generated_responses = []
-    
-    for chunk in token_chunks:
-        chunk_text = tokenizer.convert_tokens_to_string(chunk)
-        inputs = tokenizer(chunk_text, return_tensors="pt").to("cuda")
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=256,
-            num_beams=2,
-            do_sample=True,
-            top_k=50,
-            top_p=0.95,
-            temperature=0.7,
-            early_stopping=True
-        )
-        generated_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        generated_responses.append(generated_response)
+    if not input_text.strip():
+        return ""
         
-    return " ".join(generated_responses)
+    tokens = tokenizer.encode(input_text, return_tensors='pt', max_length=10000, truncation=True)
+    num_tokens = tokens.shape[1]
+    
+    # Se il testo è già entro i limiti, lo processa direttamente
+    if num_tokens <= max_length:
+        return generate_single_judgment(model, tokenizer, input_text)
+    
+    all_responses = []
+    
+    # Suddivisione in chunk
+    for i in range(0, num_tokens, max_length - chunk_overlap):
+        chunk_tokens = tokens[:, i:i + max_length]
+        
+        # Decodifica il chunk di token in testo
+        chunk_text = tokenizer.decode(chunk_tokens[0], skip_special_tokens=True)
+        
+        # Genera la risposta per il chunk
+        response = generate_single_judgment(model, tokenizer, chunk_text)
+        all_responses.append(response)
+        
+    # Combina le risposte dei chunk. Questo è un approccio semplice.
+    # Per risposte complesse, potrebbe essere necessaria una logica più avanzata.
+    combined_response = " ".join(all_responses)
+    return combined_response
 
-def generate_judgments_on_excel(model, tokenizer, uploaded_file, selected_sheet, progress_container):
+
+def generate_single_judgment(model, tokenizer, input_text):
     """
-    Genera i giudizi per un file Excel con una colonna 'Giudizio' vuota.
+    Genera un singolo giudizio utilizzando il modello.
+
+    Args:
+        model (PeftModel): Il modello fine-tuned.
+        tokenizer (AutoTokenizer): Il tokenizer del modello.
+        input_text (str): Il testo di input da elaborare.
+
+    Returns:
+        str: Il testo del giudizio generato.
     """
     try:
-        progress_container("Caricamento del file per la generazione...", "info")
-        file_bytes = uploaded_file.getvalue()
-        df_original = pd.read_excel(BytesIO(file_bytes), sheet_name=selected_sheet)
-
-        # Trova la colonna 'Giudizio' (case-insensitive)
-        giudizio_col = next((col for col in df_original.columns if 'giudizio' in str(col).lower()), None)
-        if not giudizio_col:
-            progress_container("Colonna 'Giudizio' non trovata nel file Excel.", "error")
-            return df_original, "Colonna 'Giudizio' non trovata."
-
-        # Identifica le righe con il giudizio vuoto o mancante
-        rows_to_process = df_original[df_original[giudizio_col].isnull() | (df_original[giudizio_col] == '')].copy()
-        total_rows = len(rows_to_process)
-
-        if total_rows == 0:
-            progress_container("Tutti i giudizi sono già compilati. Nessuna riga da processare.", "warning")
-            return df_original, "Nessun giudizio da generare."
-
-        progress_container(f"Trovate {total_rows} righe con giudizio vuoto. Avvio generazione...", "info")
-
-        # Esclude le colonne che non servono nel prompt
-        exclude_cols = ['alunno', 'assenti', 'cnt', 'pos']
-        input_cols = [col for col in rows_to_process.columns if str(col).lower() not in exclude_cols and col != giudizio_col]
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
         
-        # Genera i giudizi riga per riga
-        for index, row in rows_to_process.iterrows():
-            input_text = " ".join([f"{col}: {str(row[col])}" for col in input_cols if pd.notna(row[col]) and str(row[col]).strip() != ''])
-            
-            if not input_text.strip():
-                progress_container(f"Riga {index + 2}: Salto, dati insufficienti per la generazione.", "warning")
-                continue
-
-            # Genera il giudizio usando il modello
-            generated_text = _process_text_in_chunks(model, tokenizer, input_text)
-            
-            # Assegna il giudizio generato al DataFrame
-            df_original.at[index, giudizio_col] = generated_text
-
-            progress_container(f"Riga {index + 2}: Giudizio generato.", "info")
-
-        progress_container("Generazione completata con successo.", "success")
-        return df_original, "Generazione completata."
-
+        inputs = tokenizer(
+            input_text, 
+            return_tensors="pt", 
+            max_length=512, 
+            truncation=True
+        ).to(device)
+        
+        # Generazione della risposta
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=150,  # Aumenta per giudizi più lunghi
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                num_return_sequences=1,
+                eos_token_id=tokenizer.eos_token_id
+            )
+        
+        # Decodifica il testo generato
+        decoded_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return decoded_output
+        
     except Exception as e:
-        progress_container(f"Errore durante la generazione dei giudizi: {e}", "error")
-        progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return pd.DataFrame(), f"Errore: {e}"
+        return f"Errore durante la generazione: {e}"
 
-def load_model(model_path, progress_container):
+
+def load_finetuned_model(model_path, progress_container):
     """
     Carica il modello e il tokenizer fine-tuned, controllando se il percorso
     esiste localmente.
+
+    Args:
+        model_path (str): Il percorso della directory del modello salvato.
+        progress_container (callable): Funzione per inviare messaggi di stato.
+
+    Returns:
+        tuple: (model, tokenizer) o (None, None) se il caricamento fallisce.
     """
     try:
         progress_container(f"Caricamento del modello da: {model_path}...", "info")
@@ -143,3 +145,66 @@ def load_model(model_path, progress_container):
         progress_container(f"Errore nel caricamento del modello: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         return None, None
+
+def find_last_processed_row(df, column_name="Giudizio"):
+    """
+    Trova l'indice dell'ultima riga elaborata nella colonna 'Giudizio'
+    per riprendere il processo.
+    """
+    # Normalizza il nome della colonna per la ricerca
+    giudizio_col = next((col for col in df.columns if re.search(r'giudizio|valutazione', col, re.IGNORECASE)), None)
+    
+    if giudizio_col:
+        # Trova l'indice dell'ultima riga con un valore non vuoto
+        last_filled_index = df[df[giudizio_col].notna() & (df[giudizio_col].astype(str).str.strip() != '')].index.max()
+        
+        if pd.isna(last_filled_index):
+            return 0, df
+        else:
+            return last_filled_index + 1, df
+    
+    return 0, df
+
+def generate_judgments(model, tokenizer, df_to_complete, progress_container, start_row=0):
+    """
+    Genera i giudizi per un DataFrame, riprendendo da un indice specifico.
+    """
+    giudizio_col = next((col for col in df_to_complete.columns if re.search(r'giudizio|valutazione', col, re.IGNORECASE)), None)
+    
+    if giudizio_col is None:
+        progress_container("Errore: La colonna 'Giudizio' non è stata trovata nel DataFrame.", "error")
+        return df_to_complete
+
+    # Esclude le colonne che non servono nel prompt
+    exclude_cols = ['alunno', 'assenti', 'cnt']
+    input_cols = [col for col in df_to_complete.columns if col.lower() not in exclude_cols and col != giudizio_col]
+    
+    total_rows = len(df_to_complete)
+    
+    for i in range(start_row, total_rows):
+        row = df_to_complete.iloc[i]
+        
+        # Controlla se il campo 'Giudizio' è già compilato
+        if pd.notna(row[giudizio_col]) and str(row[giudizio_col]).strip() != '':
+            progress_container(f"Riga {i+1}/{total_rows}: Giudizio già presente. Saltato.", "info")
+            continue
+
+        try:
+            input_data = row[input_cols].astype(str, errors='ignore').to_dict()
+            prompt = " ".join([f"{col}: {str(val)}" for col, val in input_data.items() if pd.notna(val) and str(val).strip() != ''])
+            
+            progress_container(f"Riga {i+1}/{total_rows}: Generazione del giudizio...", "info")
+            generated_text = generate_single_judgment(model, tokenizer, prompt)
+            
+            # Assicura che la colonna sia di tipo stringa
+            df_to_complete.loc[i, giudizio_col] = str(generated_text)
+            
+            progress_container(f"Riga {i+1}/{total_rows}: Giudizio generato.", "info")
+            time.sleep(1) # per non sovraccaricare il sistema
+            
+        except Exception as e:
+            progress_container(f"Errore nella generazione del giudizio per la riga {i+1}: {e}", "error")
+            df_to_complete.loc[i, giudizio_col] = f"ERRORE: {e}"
+            continue
+            
+    return df_to_complete
