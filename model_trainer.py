@@ -73,23 +73,30 @@ def fine_tune_model(corpus_df, progress_container):
         progress_container("Preparazione dei dati per il fine-tuning...", "info")
         dataset = Dataset.from_pandas(corpus_df)
         
-        # Aggiungiamo un prefisso per il fine-tuning di T5
+        # Carica il tokenizer
+        progress_container("Caricamento del modello base e del tokenizer...", "info")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+        # Funzione di pre-processamento che tokenizza i dati
         def preprocess_function(examples):
             inputs = [f"generate judgment: {ex}" for ex in examples["input_text"]]
             targets = [ex for ex in examples["target_text"]]
-            return {"input_text": inputs, "target_text": targets}
+            model_inputs = tokenizer(inputs, max_length=512, truncation=True)
+            labels = tokenizer(targets, max_length=512, truncation=True)
+            
+            model_inputs["labels"] = labels["input_ids"]
+            return model_inputs
         
-        dataset = dataset.map(preprocess_function, batched=True)
-        dataset = dataset.train_test_split(test_size=0.1, seed=42)
-        train_dataset = dataset["train"]
-        eval_dataset = dataset["test"]
-
-        # Step 2: Carica il tokenizer e il modello base
-        progress_container("Caricamento del modello base e del tokenizer...", "info")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        # Applica il pre-processing al dataset
+        tokenized_dataset = dataset.map(preprocess_function, batched=True, remove_columns=["input_text", "target_text"])
+        tokenized_dataset = tokenized_dataset.train_test_split(test_size=0.1, seed=42)
+        train_dataset = tokenized_dataset["train"]
+        eval_dataset = tokenized_dataset["test"]
+        
+        # Carica il modello base
         model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
 
-        # Step 3: Configura PEFT/LoRA
+        # Step 2: Configura PEFT/LoRA
         peft_config = LoraConfig(
             task_type=TaskType.SEQ_2_SEQ_LM,
             inference_mode=False,
@@ -101,7 +108,7 @@ def fine_tune_model(corpus_df, progress_container):
         peft_model = get_peft_model(model, peft_config)
         peft_model.print_trainable_parameters()
 
-        # Step 4: Configura e avvia il Trainer
+        # Step 3: Configura e avvia il Trainer
         training_args = TrainingArguments(
             output_dir=OUTPUT_DIR,
             auto_find_batch_size=True,
@@ -113,7 +120,8 @@ def fine_tune_model(corpus_df, progress_container):
             overwrite_output_dir=True,
             per_device_train_batch_size=4,
             per_device_eval_batch_size=4,
-            report_to="none" # Disabilita i report esterni
+            report_to="none", # Disabilita i report esterni
+            remove_unused_columns=False, # Importante per evitare l'errore
         )
         
         # Cerca il checkpoint più recente per il resume
