@@ -66,8 +66,8 @@ def train_model_and_save(train_file):
     st.session_state.status_messages = [] # Pulisce i messaggi per un nuovo avvio
     try:
         # Usa er.get_excel_sheet_names per ottenere i nomi dei fogli
-        sheet_names = er.get_excel_sheet_names(train_file.name)
-        df = er.read_and_prepare_data_from_excel(train_file.name, sheet_names, progress_container)
+        sheet_names = er.get_excel_sheet_names(train_file)
+        df = er.read_and_prepare_data_from_excel(train_file, sheet_names, progress_container)
         st.session_state.corpus_df = cb.build_or_update_corpus(df, progress_container)
         
         if not st.session_state.corpus_df.empty:
@@ -88,7 +88,7 @@ def generate_judgments_and_save(process_file, sheet_name):
             processed_df = jg.generate_judgments_for_excel(
                 model=model,
                 tokenizer=tokenizer,
-                file_path=process_file.name,
+                file_object=process_file,
                 sheet_name=sheet_name,
                 progress_container=progress_container
             )
@@ -179,7 +179,7 @@ if st.session_state.trained_model_exists:
 
     if uploaded_process_file:
         try:
-            sheet_names = er.get_excel_sheet_names(uploaded_process_file.name)
+            sheet_names = er.get_excel_sheet_names(uploaded_process_file)
             selected_sheet = st.selectbox(
                 "Seleziona il Foglio di Lavoro",
                 options=sheet_names,
