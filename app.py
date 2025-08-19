@@ -65,7 +65,9 @@ def train_model_and_save(train_file):
     """Gestisce il flusso di addestramento del modello."""
     st.session_state.status_messages = [] # Pulisce i messaggi per un nuovo avvio
     try:
-        df = er.read_and_prepare_data_from_excel(train_file.name, [er.get_excel_sheet_names(train_file.name)[0]], progress_container)
+        # Usa er.get_excel_sheet_names per ottenere i nomi dei fogli
+        sheet_names = er.get_excel_sheet_names(train_file.name)
+        df = er.read_and_prepare_data_from_excel(train_file.name, sheet_names, progress_container)
         st.session_state.corpus_df = cb.build_or_update_corpus(df, progress_container)
         
         if not st.session_state.corpus_df.empty:
@@ -222,4 +224,3 @@ if st.session_state.process_completed_file is not None:
         file_name=f"Giudizi_Generati_{st.session_state.selected_sheet}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
