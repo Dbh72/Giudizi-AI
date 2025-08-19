@@ -128,6 +128,7 @@ def fine_tune_model(corpus_df, progress_container):
             save_strategy="steps",
             save_steps=500,
             save_total_limit=3,
+            remove_unused_columns=False, # Riga aggiunta per il fix
         )
         
         # Cerca l'ultimo checkpoint salvato per riprendere l'addestramento
