@@ -1,6 +1,7 @@
 # ==============================================================================
-# File: excel_reader.py
-# Logica per la preparazione dei dati da file Excel
+# File: excel_reader_v2.py
+# Logica per la preparazione dei dati da file Excel, integrando le
+# funzionalità di '33 Funziona.txt' per una lettura più robusta.
 # ==============================================================================
 import pandas as pd
 import openpyxl
@@ -9,59 +10,58 @@ from io import BytesIO
 import traceback
 import os
 import shutil
+import json
+from datetime import datetime
 
 # ==============================================================================
 # SEZIONE 1: FUNZIONI AUSILIARIE
 # ==============================================================================
 
-def find_giudizio_column(df):
+def make_columns_unique(columns):
     """
-    Trova la colonna 'Giudizio' nel DataFrame, cercando in modo case-insensitive
-    in tutte le intestazioni.
-
-    Args:
-        df (pd.DataFrame): Il DataFrame del foglio da analizzare.
-
-    Returns:
-        str: Il nome della colonna 'Giudizio' o None se non trovata.
+    Garantisce che i nomi delle colonne siano unici, aggiungendo un contatore
+    se necessario.
     """
-    # Cerca la parola 'giudizio' in modo case-insensitive tra le colonne.
-    for col in df.columns:
-        if isinstance(col, str) and re.search(r'giudizio', col, re.IGNORECASE):
-            return col
-    return None
+    seen = {}
+    new_columns = []
+    for col in columns:
+        original_col = col
+        if original_col in seen:
+            seen[original_col] += 1
+            new_columns.append(f"{original_col}_{seen[original_col]}")
+        else:
+            seen[original_col] = 0
+            new_columns.append(original_col)
+    return new_columns
 
-def find_header_row(file_path, sheet_name):
+def find_header_row_and_columns(df):
     """
-    Scansiona le prime righe di un foglio di lavoro per identificare la riga
-    dell'intestazione che contiene la colonna 'Giudizio'.
-
-    Args:
-        file_path (BytesIO): Il file Excel caricato in memoria.
-        sheet_name (str): Il nome del foglio di lavoro.
-
-    Returns:
-        int: L'indice di riga (0-based) dell'intestazione o None se non trovata.
+    Trova la riga di intestazione e le posizioni della colonna 'Giudizio'.
     """
-    file_path.seek(0)
-    workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-    sheet = workbook[sheet_name]
-    
-    for row_idx, row in enumerate(sheet.iter_rows(max_row=50)):
-        for cell in row:
-            if isinstance(cell.value, str) and re.search(r'giudizio', cell.value, re.IGNORECASE):
-                workbook.close()
-                return row_idx
-    
-    workbook.close()
-    return None
+    try:
+        for i in range(min(50, len(df))):
+            row_values = df.iloc[i].astype(str).str.lower()
+            try:
+                # Cerca la colonna 'Giudizio'
+                giudizio_col_found_idx = next(idx for idx, val in enumerate(row_values) if 'giudizio' in val.strip())
+                
+                if giudizio_col_found_idx is not None:
+                    header_row = df.iloc[i].ffill().str.strip()
+                    giudizio_col_name = header_row.iloc[giudizio_col_found_idx]
+                    return i, {'Giudizio': giudizio_col_name}
+            except StopIteration:
+                continue
+        
+        raise ValueError("Non è stato possibile trovare una riga di intestazione con la colonna 'Giudizio' nelle prime 50 righe.")
+    except Exception as e:
+        print(f"ERRORE in find_header_row_and_columns: {e}")
+        raise e
 
 def read_excel_file_to_df(file_path, progress_container):
     """
     Legge un file Excel da un oggetto BytesIO in un DataFrame pandas.
     Seleziona tutti i fogli di lavoro e cerca la colonna 'Giudizio'.
     Ignora i fogli che non contengono la colonna.
-
     Args:
         file_path (BytesIO): L'oggetto BytesIO del file Excel.
         progress_container (callable): Funzione per inviare messaggi di stato.
@@ -73,21 +73,24 @@ def read_excel_file_to_df(file_path, progress_container):
     try:
         corpus_list = []
         
-        # Legge tutti i fogli del file
         file_path.seek(0)
-        all_sheets_df = pd.read_excel(file_path, sheet_name=None)
+        all_sheets_df = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
         
         for sheet in all_sheets_df:
             try:
                 progress_container(f"Analisi del foglio: '{sheet}'...", "info")
-                df = all_sheets_df[sheet]
+                df_original = all_sheets_df[sheet]
                 
-                # Trova la colonna 'Giudizio'
-                giudizio_col = find_giudizio_column(df)
+                # Trova la riga di intestazione e le colonne necessarie
+                header_row_index, column_mapping = find_header_row_and_columns(df_original.copy())
+
+                clean_columns = df_original.iloc[header_row_index].ffill().str.strip().tolist()
+                unique_columns = make_columns_unique(clean_columns)
                 
-                if not giudizio_col:
-                    progress_container(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet}'. Questo foglio verrà saltato.", "warning")
-                    continue
+                df = df_original.iloc[header_row_index + 1:].copy()
+                df.columns = unique_columns
+                
+                giudizio_col = column_mapping['Giudizio']
                 
                 # Rimuove le righe dove il giudizio è vuoto o non è una stringa
                 df = df[df[giudizio_col].apply(lambda x: isinstance(x, str) and x.strip() != '')]
@@ -100,8 +103,8 @@ def read_excel_file_to_df(file_path, progress_container):
                 data_for_dataset = []
                 for index, row in df.iterrows():
                     # Rimuove la colonna 'Giudizio' per creare l'input_text
-                    input_data = row.drop(labels=[giudizio_col])
-                    prompt_text = " ".join([f"{col}: {str(val)}" for col, val in input_data.items() if pd.notna(val)])
+                    input_data = row.drop(labels=[giudizio_col], errors='ignore')
+                    prompt_text = " ".join([f"{col}: {str(val)}" for col, val in input_data.items() if pd.notna(val) and str(val).strip() != ''])
                     target_text = str(row[giudizio_col]) if pd.notna(row[giudizio_col]) else ""
 
                     # Aggiunge solo se c'è almeno un prompt valido
@@ -131,4 +134,3 @@ def read_excel_file_to_df(file_path, progress_container):
         progress_container(f"Errore nella lettura del file: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         return pd.DataFrame()
-
