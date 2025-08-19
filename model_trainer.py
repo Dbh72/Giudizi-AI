@@ -1,8 +1,6 @@
 # ==============================================================================
 # File: model_trainer.py
 # Modulo per l'addestramento (Fine-Tuning) del modello di linguaggio.
-# Questo file contiene la logica per preparare i dati, configurare l'ambiente
-# di addestramento e avviare il processo di fine-tuning.
 # ==============================================================================
 
 # SEZIONE 1: LIBRERIE NECESSARIE
@@ -59,7 +57,7 @@ class SaveEveryNStepsCallback(TrainerCallback):
                 json.dump({"global_step": state.global_step}, f)
             
             print(f"Salvato il checkpoint in {output_dir}")
-            
+
 class LossLoggingCallback(TrainerCallback):
     """
     Un callback personalizzato per registrare e stampare la loss di addestramento
@@ -72,7 +70,7 @@ class LossLoggingCallback(TrainerCallback):
         if state.global_step > 0 and 'loss' in logs:
             loss = logs['loss']
             print(f"Passo: {state.global_step}, Loss: {loss:.4f}")
-            
+
 # ==============================================================================
 # SEZIONE 3: FUNZIONE PRINCIPALE PER IL FINE-TUNING
 # ==============================================================================
@@ -108,7 +106,7 @@ def fine_tune_model(corpus_df, progress_container):
             return model_inputs
 
         dataset = Dataset.from_pandas(corpus_df)
-        tokenized_dataset = dataset.map(preprocess_function, batched=True, remove_columns=corpus_df.columns)
+        tokenized_dataset = dataset.map(preprocess_function, batched=True)
         
         # Suddividi il dataset in addestramento e valutazione
         dataset_dict = tokenized_dataset.train_test_split(test_size=0.1)
@@ -121,7 +119,7 @@ def fine_tune_model(corpus_df, progress_container):
         progress_container("Caricamento del modello base e configurazione di PEFT...", "info")
         base_model = AutoModelForSeq2SeqLM.from_pretrained(
             MODEL_NAME, 
-            load_in_8bit=False,  # Set a False
+            load_in_8bit=False,
             torch_dtype=torch.bfloat16, 
             device_map="auto"
         )
