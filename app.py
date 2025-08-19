@@ -46,26 +46,13 @@ def progress_container(message, type="info"):
     st.session_state.status_messages.append({"message": message, "type": type})
     st.rerun()
 
-# Funzione per la pulizia dello stato dopo l'uso.
-def clear_state():
-    """Pulisce le variabili di stato per un nuovo processo."""
-    st.session_state.status_messages = []
-    if "corpus_df" in st.session_state:
-        del st.session_state.corpus_df
-    if "trained_model_exists" in st.session_state:
-        del st.session_state.trained_model_exists
-    if "process_completed_file" in st.session_state:
-        del st.session_state.process_completed_file
-    if "selected_sheet" in st.session_state:
-        del st.session_state.selected_sheet
-    
 # Funzione per inizializzare o caricare lo stato.
 def init_state():
-    """Inizializza le variabili di sessione di Streamlit."""
+    """Inizializza le variabili di sessione di Streamlit se non esistono."""
     if "status_messages" not in st.session_state:
         st.session_state.status_messages = []
     if "corpus_df" not in st.session_state:
-        st.session_state.corpus_df = cb.load_corpus(progress_container)
+        st.session_state.corpus_df = pd.DataFrame()
     if "trained_model_exists" not in st.session_state:
         st.session_state.trained_model_exists = os.path.exists(os.path.join(OUTPUT_DIR, "final_model"))
     if "process_completed_file" not in st.session_state:
@@ -76,7 +63,7 @@ def init_state():
 # Funzione per l'addestramento del modello.
 def train_model_and_save(train_file):
     """Gestisce il flusso di addestramento del modello."""
-    clear_state()
+    st.session_state.status_messages = [] # Pulisce i messaggi per un nuovo avvio
     try:
         df = er.read_and_prepare_data_from_excel(train_file.name, [er.get_excel_sheet_names(train_file.name)[0]], progress_container)
         st.session_state.corpus_df = cb.build_or_update_corpus(df, progress_container)
@@ -91,7 +78,7 @@ def train_model_and_save(train_file):
 # Funzione per la generazione dei giudizi.
 def generate_judgments_and_save(process_file, sheet_name):
     """Gestisce il flusso di generazione dei giudizi."""
-    clear_state()
+    st.session_state.status_messages = [] # Pulisce i messaggi per un nuovo avvio
     progress_container(f"Generazione dei giudizi per il foglio '{sheet_name}'...", "info")
     try:
         model, tokenizer = jg.load_model(os.path.join(OUTPUT_DIR, "final_model"), progress_container)
@@ -132,14 +119,10 @@ st.markdown("---")
 init_state()
 
 # Cache the model loading to prevent it from reloading on every interaction.
-# The old st.experimental_singleton has been replaced with st.cache_resource.
-# This decorator ensures the function is run only once for a given set of arguments.
-# Since we're not passing any arguments, it will be run just one time on app startup.
 @st.cache_resource
 def load_cached_model():
     """
     Carica il modello e il tokenizer solo una volta per tutta la sessione.
-    Utilizza st.cache_resource per un caching efficiente di oggetti complessi.
     """
     if st.session_state.trained_model_exists:
         try:
@@ -175,7 +158,7 @@ if st.session_state.trained_model_exists:
         if os.path.exists(OUTPUT_DIR):
             shutil.rmtree(OUTPUT_DIR)
             st.session_state.trained_model_exists = False
-            clear_state()
+            st.session_state.status_messages = []
             st.rerun()
         else:
             progress_container("Nessun modello da eliminare.", "warning")
