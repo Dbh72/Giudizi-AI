@@ -16,6 +16,7 @@ from datetime import datetime
 import json
 import time
 from config import OUTPUT_DIR, MODEL_NAME
+from io import BytesIO
 
 # Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
