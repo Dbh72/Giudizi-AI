@@ -127,7 +127,6 @@ def fine_tune_model(corpus_df, progress_container):
             report_to="none",
             save_strategy="steps",
             save_steps=500,
-            eval_steps=500,
             save_total_limit=3,
         )
         
