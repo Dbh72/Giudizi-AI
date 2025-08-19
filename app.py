@@ -1,4 +1,34 @@
 # ==============================================================================
+# SEZIONE 0: CONTROLLO DELLE VERSIONI DELLE LIBRERIE
+# ==============================================================================
+# Questo blocco di codice verifica le versioni delle librerie chiave
+# utilizzate nel progetto e le stampa nel terminale per scopi di debug.
+# Verrà eseguito all'avvio dell'app.
+import importlib
+import sys
+
+# Lista delle librerie da controllare.
+# Nota: "transformers" è corretto, "gradio" e "sentence-transformers" sono stati rimossi.
+libraries_to_check = ['pandas', 'openpyxl', 'datasets', 'transformers', 'peft', 'torch', 'streamlit']
+
+print("--- Versioni delle Librerie Chiave ---")
+for lib_name in libraries_to_check:
+    try:
+        # Gestione speciale per le librerie con nomi modulo diversi
+        # (se necessario, come per 'sentence-transformers', ma in questo caso non serve)
+        module_name = lib_name.replace('-', '_')
+        lib = importlib.import_module(module_name)
+        print(f"{lib_name}: {lib.__version__}")
+    except ImportError:
+        print(f"{lib_name}: Non trovata")
+    except AttributeError:
+        print(f"{lib_name}: Attributo __version__ non trovato")
+
+print("---------------------------------")
+print(f"Versione di Python: {sys.version}")
+print("---------------------------------")
+
+# ==============================================================================
 # File: app.py
 # L'interfaccia utente principale per l'applicazione di generazione di giudizi.
 # Utilizza Streamlit per creare un'interfaccia web interattiva.
@@ -179,4 +209,5 @@ if st.session_state.process_completed_file is not None:
         file_name=f"Giudizi_Generati_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
