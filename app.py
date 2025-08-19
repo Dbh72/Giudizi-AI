@@ -1,6 +1,13 @@
 # ==============================================================================
 # File: app.py
 # L'interfaccia utente principale per l'applicazione di generazione di giudizi.
+# Utilizza Streamlit per creare un'interfaccia web interattiva.
+# Questo file gestisce l'intero flusso di lavoro:
+# 1. Caricamento dei file di addestramento e/o del modello fine-tunato.
+# 2. Addestramento (fine-tuning) del modello.
+# 3. Caricamento del file Excel da completare.
+# 4. Generazione dei giudizi per il file caricato.
+# 5. Download del file Excel completato.
 # ==============================================================================
 
 # SEZIONE 0: LIBRERIE NECESSARIE E CONFIGURAZIONE
@@ -17,208 +24,218 @@ import json
 from datasets import Dataset, DatasetDict
 import re
 import time
+import sys
 
-# Importa i moduli personalizzati e il file di configurazione
+# Importa i moduli personalizzati
 import excel_reader as er
 import model_trainer as mt
 import judgment_generator as jg
 import corpus_builder as cb
-from config import OUTPUT_DIR, MODEL_NAME
+from config import OUTPUT_DIR, CORPUS_FILE, MODEL_NAME
 
 # Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
 
-# Configurazione della pagina di Streamlit
-st.set_page_config(layout="wide", page_title="Generatore di Giudizi AI")
+# ==============================================================================
+# SEZIONE 1: FUNZIONI AUSILIARIE
+# ==============================================================================
 
-# Inizializzazione delle variabili di stato di Streamlit
-if 'model_state' not in st.session_state:
+def log_and_display_message(message, type="info"):
+    """
+    Funzione per stampare un messaggio in console e aggiungerlo alla session_state di Streamlit.
+    """
+    if 'status_messages' not in st.session_state:
+        st.session_state.status_messages = []
+    
+    print(f"[{type.upper()}] {message}")
+    st.session_state.status_messages.append({'message': message, 'type': type})
+
+def clear_session_state():
+    """
+    Pulisce lo stato della sessione per riavviare l'applicazione.
+    """
+    st.session_state.status_messages = []
+    st.session_state.fine_tuning_state = 'initial'
     st.session_state.model_state = 'not_loaded'
-if 'status_messages' not in st.session_state:
-    st.session_state.status_messages = []
-if 'process_completed_file' not in st.session_state:
+    st.session_state.trained_model = None
+    st.session_state.tokenizer = None
     st.session_state.process_completed_file = None
-if 'excel_file_path' not in st.session_state:
-    st.session_state.excel_file_path = None
-if 'selected_sheet' not in st.session_state:
     st.session_state.selected_sheet = None
-if 'corpus_exists' not in st.session_state:
-    st.session_state.corpus_exists = False
-if 'model_exists' not in st.session_state:
-    st.session_state.model_exists = False
+    st.session_state.training_df = None
+    st.session_state.file_uploaded_for_training = False
+    
+# Inizializzazione dello stato della sessione
+if 'status_messages' not in st.session_state:
+    clear_session_state()
 
 # ==============================================================================
-# SEZIONE 1: FUNZIONI PER LA GESTIONE DEGLI STATI E DEL FLUSSO
+# SEZIONE 2: LAYOUT E LOGICA DELL'INTERFACCIA UTENTE
 # ==============================================================================
 
-def update_status(message, type="info"):
-    """Aggiunge un messaggio di stato alla lista."""
-    st.session_state.status_messages.append(message)
-
-def clear_status():
-    """Cancella tutti i messaggi di stato."""
-    st.session_state.status_messages = []
-
-def check_file_states():
-    """Controlla l'esistenza dei file principali (corpus e modello) all'avvio."""
-    # Controlla se il corpus di addestramento esiste
-    if os.path.exists(cb.CORPUS_FILE):
-        st.session_state.corpus_exists = True
-        update_status("Corpus di addestramento trovato.", "info")
-    else:
-        st.session_state.corpus_exists = False
-        update_status("Nessun corpus di addestramento trovato. Devi caricarne uno per addestrare il modello.", "warning")
-    
-    # Controlla se il modello fine-tuned esiste
-    if os.path.exists(OUTPUT_DIR):
-        st.session_state.model_exists = True
-        update_status(f"Modello fine-tuned trovato in '{OUTPUT_DIR}'. Puoi passare direttamente alla sezione 2.", "info")
-    else:
-        st.session_state.model_exists = False
-        update_status("Nessun modello fine-tuned trovato. Devi addestrare il modello prima di generare giudizi.", "warning")
-
-def fine_tune_model_flow(file_input):
-    """Gestisce l'intero flusso di fine-tuning del modello."""
-    clear_status()
-    st.session_state.model_state = 'training'
-    
-    update_status("Avvio del processo di fine-tuning...", "info")
-    
-    try:
-        if file_input:
-            # Step 1: Aggiorna o costruisce il corpus
-            update_status("Aggiornamento del corpus con i dati del file Excel...", "info")
-            corpus_df = er.read_excel_file_to_df(BytesIO(file_input.getvalue()), update_status)
-            if not corpus_df.empty:
-                corpus_df = cb.build_or_update_corpus(corpus_df, update_status)
-            
-            # Step 2: Avvia l'addestramento
-            if not corpus_df.empty:
-                update_status(f"Avvio dell'addestramento del modello con {len(corpus_df)} righe di dati...", "info")
-                model_trainer_status = mt.fine_tune(corpus_df, update_status)
-                if model_trainer_status:
-                    update_status("Fine-tuning completato con successo!", "success")
-                else:
-                    update_status("Errore durante il fine-tuning. Controlla i log.", "error")
-            else:
-                update_status("Il file caricato non contiene dati validi per l'addestramento.", "error")
-        else:
-            update_status("Per favore, carica un file Excel con i dati di addestramento.", "warning")
-            
-    except Exception as e:
-        update_status(f"Errore critico durante il fine-tuning: {e}\n\nTraceback:\n{traceback.format_exc()}", "error")
-    finally:
-        st.session_state.model_state = 'ready'
-        check_file_states()
-
-def process_excel_for_judgments():
-    """Gestisce il flusso di generazione dei giudizi su un file Excel."""
-    clear_status()
-    st.session_state.model_state = 'generating'
-    
-    if st.session_state.excel_file_path and st.session_state.selected_sheet:
-        update_status(f"Avvio della generazione dei giudizi per il foglio '{st.session_state.selected_sheet}'...", "info")
-        
-        try:
-            # Carica il modello fine-tuned
-            model, tokenizer = jg.load_trained_model(OUTPUT_DIR, update_status)
-            
-            if model and tokenizer:
-                # Legge il file Excel da completare
-                df_to_complete = er.read_excel_file_to_df(st.session_state.excel_file_path, update_status, sheet_name=st.session_state.selected_sheet, read_only=True)
-                
-                if not df_to_complete.empty:
-                    # Trova la colonna 'Giudizio'
-                    giudizio_col = er.find_giudizio_column(df_to_complete)
-                    if giudizio_col:
-                        # Genera i giudizi
-                        update_status(f"Trovata la colonna 'Giudizio'. Generazione in corso...", "info")
-                        completed_df = jg.generate_judgments_for_excel(
-                            model, tokenizer, df_to_complete, giudizio_col, st.session_state.selected_sheet, OUTPUT_DIR, update_status
-                        )
-                        st.session_state.process_completed_file = completed_df
-                        update_status("Generazione completata con successo!", "success")
-                        st.balloons()
-                    else:
-                        update_status("Colonna 'Giudizio' non trovata nel foglio selezionato. Assicurati che l'intestazione esista.", "error")
-                else:
-                    update_status("Errore nel caricamento del file. Controlla il formato e i dati.", "error")
-            else:
-                update_status("Errore nel caricamento del modello. Assicurati che il percorso sia corretto e che il modello sia stato addestrato.", "error")
-
-        except Exception as e:
-            update_status(f"Errore nella lettura o nella generazione: {e}\n\nTraceback:\n{traceback.format_exc()}", "error")
-        finally:
-            st.session_state.model_state = 'ready'
-            st.rerun()
-
-# ==============================================================================
-# SEZIONE 2: LAYOUT DELL'INTERFACCIA UTENTE
-# ==============================================================================
-
-# Titolo principale
-st.title("Generatore di Giudizi AI")
+st.title("📚 Generatore di Giudizi per la Scuola AI")
+st.markdown("---")
+st.markdown(
+    """
+    Benvenuto nel Generatore di Giudizi AI!
+    Questa applicazione ti permette di:
+    1.  **Addestrare (Fine-Tuning) un modello**: Carica un file Excel contenente il corpus di addestramento.
+        Il modello imparerà a generare giudizi basati sui tuoi dati.
+        Il modello addestrato e il corpus di dati verranno salvati in locale per riutilizzi futuri.
+    2.  **Generare Giudizi**: Carica un file Excel con la colonna 'Giudizio' vuota.
+        Il modello completerà la colonna e potrai scaricare il file aggiornato.
+    """
+)
 st.markdown("---")
 
-# Controlla lo stato dei file all'avvio o dopo un'operazione
-if 'first_run' not in st.session_state:
-    st.session_state.first_run = True
-    check_file_states()
+# Rilevamento automatico e caricamento del modello
+log_and_display_message("Avvio dell'applicazione...", "info")
+if st.session_state.model_state == 'not_loaded':
+    log_and_display_message("Controllo della presenza di un modello fine-tuned...", "info")
+    if os.path.exists(OUTPUT_DIR):
+        log_and_display_message(f"Trovata directory del modello '{OUTPUT_DIR}'. Caricamento in corso...", "info")
+        st.session_state.trained_model, st.session_state.tokenizer = jg.load_trained_model(OUTPUT_DIR, log_and_display_message)
+        if st.session_state.trained_model and st.session_state.tokenizer:
+            st.session_state.model_state = 'ready'
+            log_and_display_message("Modello fine-tuned caricato con successo!", "success")
+        else:
+            st.session_state.model_state = 'failed'
+            log_and_display_message("Errore nel caricamento del modello fine-tuned.", "error")
+    else:
+        log_and_display_message("Nessun modello fine-tuned trovato. Sarà possibile addestrarne uno nuovo.", "info")
+        st.session_state.model_state = 'untrained'
+        
+st.markdown("---")
+st.header("1. Addestramento del Modello")
+st.markdown(
+    """
+    **Addestra il modello** caricando un file Excel con i dati di esempio.
+    Assicurati che il file contenga una colonna 'Giudizio' e le altre colonne
+    necessarie per la descrizione dello studente.
+    """
+)
 
-st.header("1. Addestramento Incrementale del Modello")
-st.markdown("Carica un file Excel (con colonne 'Giudizio' e 'descrizione') per addestrare il modello. Il processo riprenderà dall'ultimo stato salvato.")
-st.markdown(f"**Stato Corpus:** {'Presente' if st.session_state.corpus_exists else 'Non Presente'}")
-st.markdown(f"**Stato Modello:** {'Presente' if st.session_state.model_exists else 'Non Presente'}")
-
-with st.container(border=True):
-    fine_tune_file_input = st.file_uploader("Carica file Excel per l'addestramento", type=['xlsx', 'xls', 'xlsm'])
-    
-    # Pulsante per avviare il fine-tuning
-    col1, col2 = st.columns(2)
-    with col1:
-        fine_tune_button = st.button("Avvia Fine-Tuning", type="primary", use_container_width=True, disabled=(st.session_state.model_state == 'training'))
-    with col2:
-        delete_corpus_button = st.button("Elimina Corpus", type="secondary", use_container_width=True, disabled=(st.session_state.model_state == 'training'))
-
-    if fine_tune_button:
-        fine_tune_model_flow(fine_tune_file_input)
-    if delete_corpus_button:
-        cb.delete_corpus(update_status)
-        st.session_state.model_exists = False
-        st.session_state.corpus_exists = False
+# Aggiungi un'opzione per eliminare il corpus di addestramento
+if os.path.exists(CORPUS_FILE):
+    st.info("Corpus di addestramento esistente. Puoi caricare un nuovo file per aggiornarlo o eliminarlo.")
+    if st.button("Elimina Corpus di Addestramento"):
+        cb.delete_corpus(log_and_display_message)
         st.rerun()
 
-st.markdown("---")
-st.header("2. Generazione di Giudizi per File Excel")
+fine_tune_file = st.file_uploader(
+    "Carica qui il tuo file Excel per il fine-tuning:",
+    type=["xlsx", "xls", "xlsm"],
+    key="fine_tune_file_uploader",
+    help="Carica un file Excel con i dati per l'addestramento del modello."
+)
 
-with st.container(border=True):
-    st.markdown("Carica un file Excel con la colonna 'Giudizio' vuota. Il modello compilerà la colonna e potrai scaricare il file aggiornato.")
-    excel_file_input = st.file_uploader("Carica file Excel da completare", type=['xlsx', 'xls', 'xlsm'], key="excel_gen_uploader")
-    
-    # Logica per gestire il cambio di file e l'elenco dei fogli
-    excel_sheet_dropdown_options = []
-    process_excel_button_disabled = True
-    
-    if excel_file_input:
-        try:
-            st.session_state.excel_file_path = BytesIO(excel_file_input.getvalue())
-            sheet_names = er.get_excel_sheet_names(st.session_state.excel_file_path, update_status)
-            excel_sheet_dropdown_options = sheet_names
-            process_excel_button_disabled = not st.session_state.model_exists or not sheet_names or (st.session_state.model_state == 'generating')
-        except Exception as e:
-            update_status(f"Errore nella lettura dei fogli del file: {e}", "error")
-            st.session_state.excel_file_path = None
+if fine_tune_file:
+    log_and_display_message(f"File '{fine_tune_file.name}' caricato per l'addestramento.", "info")
+    st.session_state.file_uploaded_for_training = True
+    st.session_state.training_df = er.read_excel_file_to_df(BytesIO(fine_tune_file.getvalue()), log_and_display_message)
 
-    selected_sheet = st.selectbox("Seleziona Foglio di Lavoro", options=excel_sheet_dropdown_options, index=None, placeholder="Seleziona un foglio...")
-    
-    # Se un foglio è stato selezionato, lo memorizziamo
-    if selected_sheet:
-        st.session_state.selected_sheet = selected_sheet
+    if not st.session_state.training_df.empty:
+        st.success(f"Dati di addestramento letti con successo. Trovate {len(st.session_state.training_df)} righe.")
+        if st.button("Avvia Fine-Tuning"):
+            if st.session_state.fine_tuning_state == 'initial':
+                try:
+                    log_and_display_message("Avvio del processo di fine-tuning...", "info")
+                    st.session_state.fine_tuning_state = 'running'
+                    
+                    # Aggiorna il corpus di dati
+                    corpus_df = cb.build_or_update_corpus(st.session_state.training_df, log_and_display_message)
+
+                    if not corpus_df.empty:
+                        # Avvia il fine-tuning
+                        st.session_state.trained_model, st.session_state.tokenizer = mt.fine_tune(corpus_df, log_and_display_message)
+                        
+                        if st.session_state.trained_model and st.session_state.tokenizer:
+                            log_and_display_message("Fine-tuning completato con successo!", "success")
+                            st.session_state.model_state = 'ready'
+                        else:
+                            log_and_display_message("Fine-tuning fallito.", "error")
+                            st.session_state.model_state = 'failed'
+                            
+                    else:
+                        log_and_display_message("Impossibile procedere: il corpus di addestramento è vuoto.", "error")
+                        st.session_state.model_state = 'failed'
+                        
+                except Exception as e:
+                    log_and_display_message(f"Errore critico durante il fine-tuning: {e}", "error")
+                    log_and_display_message(f"Traceback: {traceback.format_exc()}", "error")
+                    st.session_state.fine_tuning_state = 'error'
+                    st.session_state.model_state = 'failed'
+                finally:
+                    st.session_state.fine_tuning_state = 'initial'
+                    st.rerun()
+            else:
+                log_and_display_message("Il fine-tuning è già in esecuzione. Attendi il completamento.", "warning")
     else:
-        st.session_state.selected_sheet = None
+        st.error("Il file Excel non contiene dati validi per l'addestramento.")
 
-    if st.button("Avvia Generazione su File", type="primary", use_container_width=True, disabled=process_excel_button_disabled or not st.session_state.selected_sheet):
-        process_excel_for_judgments()
+st.markdown("---")
+st.header("2. Generazione di Giudizi")
+
+if st.session_state.model_state == 'ready':
+    st.success("Modello pronto per la generazione di giudizi!")
+    
+    excel_file_to_complete = st.file_uploader(
+        "Carica qui il file Excel da completare:",
+        type=["xlsx", "xls", "xlsm"],
+        key="excel_to_complete_uploader",
+        help="Carica un file Excel con la colonna 'Giudizio' da riempire."
+    )
+    
+    if excel_file_to_complete:
+        st.info("File caricato. Seleziona il foglio di lavoro.")
+        
+        try:
+            # Leggi i nomi dei fogli
+            excel_file_bytes = BytesIO(excel_file_to_complete.getvalue())
+            xl = pd.ExcelFile(excel_file_bytes)
+            sheet_names = xl.sheet_names
+            
+            selected_sheet = st.selectbox("Seleziona il Foglio di Lavoro:", sheet_names, key="selected_sheet")
+            
+            if selected_sheet:
+                st.session_state.selected_sheet = selected_sheet
+                
+                if st.button("Avvia Generazione"):
+                    try:
+                        log_and_display_message("Lettura del file Excel da completare...", "info")
+                        df_to_complete = pd.read_excel(excel_file_bytes, sheet_name=selected_sheet)
+                        
+                        giudizio_col = er.find_giudizio_column(df_to_complete)
+                        
+                        if giudizio_col:
+                            log_and_display_message(f"Colonna 'Giudizio' trovata: '{giudizio_col}'. Avvio della generazione...", "info")
+                            
+                            st.session_state.process_completed_file = jg.generate_judgments_for_excel(
+                                st.session_state.trained_model, 
+                                st.session_state.tokenizer, 
+                                df_to_complete, 
+                                giudizio_col, 
+                                selected_sheet, 
+                                OUTPUT_DIR, 
+                                log_and_display_message
+                            )
+                            
+                            st.success("Generazione completata con successo!")
+                            st.balloons()
+                            
+                        else:
+                            log_and_display_message("Colonna 'Giudizio' non trovata nel foglio selezionato.", "error")
+                            st.error("Colonna 'Giudizio' non trovata nel foglio selezionato. Assicurati che l'intestazione esista.")
+                    except Exception as e:
+                        log_and_display_message(f"Errore nella lettura del file Excel: {e}", "error")
+                        log_and_display_message(f"Traceback: {traceback.format_exc()}", "error")
+                        
+        except Exception as e:
+            log_and_display_message(f"Errore nel caricamento del file: {e}", "error")
+            log_and_display_message(f"Traceback: {traceback.format_exc()}", "error")
+            st.error("Errore nel caricamento del file. Controlla il formato e riprova.")
+
+else:
+    st.warning("Per generare i giudizi, devi prima addestrare un modello nella sezione '1. Addestramento del Modello'.")
 
 # ==============================================================================
 # SEZIONE 3: VISUALIZZAZIONE RISULTATI E DOWNLOAD
@@ -228,14 +245,12 @@ st.header("3. Stato e Download")
 
 # Visualizza i messaggi di stato
 for message in st.session_state.status_messages:
-    if "Errore" in message:
-        st.error(message)
-    elif "Attenzione" in message:
-        st.warning(message)
-    elif "Successo" in message:
-        st.success(message)
+    if message['type'] == "error":
+        st.error(message['message'])
+    elif message['type'] == "warning":
+        st.warning(message['message'])
     else:
-        st.info(message)
+        st.info(message['message'])
         
 if st.session_state.process_completed_file is not None:
     st.write("### Scarica il file completato")
@@ -250,6 +265,6 @@ if st.session_state.process_completed_file is not None:
         label="Scarica il file aggiornato",
         data=output_buffer,
         file_name=f"Giudizi_Generati_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
