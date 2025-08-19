@@ -5,7 +5,6 @@
 
 # SEZIONE 1: LIBRERIE NECESSARIE
 # ==============================================================================
-# Importiamo tutte le librerie essenziali per l'addestramento.
 import torch
 import warnings
 from datasets import Dataset, DatasetDict
