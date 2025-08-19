@@ -38,53 +38,47 @@ class SaveEveryNStepsCallback(TrainerCallback):
         self.save_steps = save_steps
 
     def on_step_end(self, args, state, control, **kwargs):
-        if state.global_step % self.save_steps == 0:
-            peft_model = kwargs['model']
-            tokenizer = kwargs['tokenizer']
-            
-            # Crea un percorso di salvataggio basato sul passo corrente
-            save_path = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
-            peft_model.save_pretrained(save_path)
-            tokenizer.save_pretrained(save_path)
-            print(f"Modello e tokenizer salvati al passo {state.global_step} in: {save_path}")
+        """
+        Controlla se è il momento di salvare il modello.
+        """
+        if state.global_step % self.save_steps == 0 and state.global_step > 0:
+            output_dir_step = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
+            kwargs['model'].save_pretrained(output_dir_step)
+            kwargs['tokenizer'].save_pretrained(output_dir_step)
+            print(f"Modello salvato al passo {state.global_step}")
+            return control
+        return control
 
 # ==============================================================================
 # SEZIONE 3: FUNZIONI PRINCIPALI
 # ==============================================================================
 
-def find_last_checkpoint(output_dir):
+def train_model(corpus_df, progress_container):
     """
-    Trova l'ultimo checkpoint salvato nella directory di output.
-    """
-    if not os.path.exists(output_dir):
-        return None
-    
-    checkpoints = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-")]
-    if not checkpoints:
-        return None
-    
-    # Ordina i checkpoint in base al numero di passo
-    checkpoints.sort(key=lambda x: int(x.split('-')[1]))
-    
-    return os.path.join(output_dir, checkpoints[-1])
-
-def fine_tune_model(train_df, eval_df, progress_container):
-    """
-    Funzione principale per il fine-tuning del modello.
+    Avvia il processo di fine-tuning del modello.
     """
     try:
-        # Step 1: Prepara i dati in formato Dataset
-        progress_container("Preparazione dei dati per il fine-tuning...", "info")
-        train_dataset = Dataset.from_pandas(train_df)
-        eval_dataset = Dataset.from_pandas(eval_df)
-
-        # Step 2: Carica il tokenizer e il modello base
-        progress_container(f"Caricamento del modello base '{MODEL_NAME}' e del tokenizer...", "info")
+        progress_container("Preparazione dei dati per l'addestramento...", "info")
+        dataset = Dataset.from_pandas(corpus_df)
+        dataset = dataset.train_test_split(test_size=0.1)
+        train_dataset = dataset['train']
+        eval_dataset = dataset['test']
+        
+        # Step 1: Carica il tokenizer e il modello base
+        progress_container("Caricamento del modello base...", "info")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
+        # Aggiungi un token di fine-sequenza, se non è già presente
+        if tokenizer.eos_token is None:
+            tokenizer.add_special_tokens({'eos_token': '</s>'})
+        
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            MODEL_NAME, 
+            torch_dtype=torch.bfloat16, 
+            device_map="auto"
+        )
+        model.resize_token_embeddings(len(tokenizer))
 
-        # Step 3: Configura e applica LoRA
-        progress_container("Configurazione di LoRA per il fine-tuning...", "info")
+        # Step 2: Configura PEFT (LoRA)
         lora_config = LoraConfig(
             r=16,
             lora_alpha=32,
@@ -94,36 +88,36 @@ def fine_tune_model(train_df, eval_df, progress_container):
             task_type=TaskType.SEQ_2_SEQ_LM
         )
         peft_model = get_peft_model(model, lora_config)
+        progress_container("Configurazione PEFT applicata con successo.", "success")
         peft_model.print_trainable_parameters()
-        
-        last_checkpoint = find_last_checkpoint(OUTPUT_DIR)
-        if last_checkpoint:
-            progress_container(f"Trovato checkpoint precedente: {last_checkpoint}. Riprendendo l'addestramento...", "info")
-            peft_model = PeftModel.from_pretrained(peft_model, last_checkpoint)
 
-        # Step 4: Avvia l'addestramento
-        progress_container("Configurazione degli argomenti di addestramento...", "info")
+        # Step 3: Configura gli argomenti di addestramento
         training_args = TrainingArguments(
             output_dir=OUTPUT_DIR,
             num_train_epochs=1,
-            per_device_train_batch_size=8,
-            per_device_eval_batch_size=8,
-            warmup_steps=500,
-            weight_decay=0.01,
-            logging_dir=f"{OUTPUT_DIR}/logs",
-            logging_steps=100,
+            per_device_train_batch_size=4,
+            gradient_accumulation_steps=4,
+            eval_strategy="steps",
+            eval_steps=500,
             save_strategy="steps",
             save_steps=500,
-            # L'argomento 'evaluation_strategy' è stato rinominato in 'eval_strategy'
-            # per essere compatibile con le versioni più recenti di Transformers.
-            # Questo risolve l'errore che hai riscontrato.
-            eval_strategy="steps", 
-            eval_steps=500,
-            load_best_model_at_end=True,
-            metric_for_best_model="eval_loss",
-            report_to="none" # Disabilita i report per evitare dipendenze aggiuntive
+            learning_rate=2e-4,
+            fp16=False,
+            bf16=True,
+            logging_steps=100,
+            save_total_limit=2,
+            push_to_hub=False,
         )
-   
+
+        # Cerca l'ultimo checkpoint
+        last_checkpoint = None
+        if os.path.exists(OUTPUT_DIR):
+            subdirectories = [d for d in os.listdir(OUTPUT_DIR) if os.path.isdir(os.path.join(OUTPUT_DIR, d))]
+            checkpoint_dirs = [d for d in subdirectories if d.startswith("checkpoint-")]
+            if checkpoint_dirs:
+                last_checkpoint = os.path.join(OUTPUT_DIR, sorted(checkpoint_dirs, key=lambda x: int(x.split('-')[1]))[-1])
+                progress_container(f"Trovato l'ultimo checkpoint: {last_checkpoint}. L'addestramento riprenderà da qui.", "info")
+            
         progress_container("Avvio del processo di addestramento...", "info")
         trainer = Trainer(
             model=peft_model,
