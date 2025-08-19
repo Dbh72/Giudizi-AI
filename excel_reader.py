@@ -41,90 +41,62 @@ def find_header_row(file_path, sheet_name):
         sheet_name (str): Il nome del foglio di lavoro.
 
     Returns:
-        int: L'indice di riga (0-based) dell'intestazione, o -1 se non trovata.
+        int: L'indice di riga (0-based) dell'intestazione o None se non trovata.
     """
+    file_path.seek(0)
     workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     sheet = workbook[sheet_name]
     
-    # Legge le prime 100 righe per trovare l'intestazione
-    for row_idx, row in enumerate(sheet.iter_rows(max_row=100)):
+    for row_idx, row in enumerate(sheet.iter_rows(max_row=50)):
         for cell in row:
             if isinstance(cell.value, str) and re.search(r'giudizio', cell.value, re.IGNORECASE):
                 workbook.close()
                 return row_idx
     
     workbook.close()
-    return -1
+    return None
 
-def get_excel_sheet_names(file_path, progress_container):
+def read_excel_file_to_df(file_path, progress_container):
     """
-    Legge i nomi dei fogli di lavoro da un file Excel.
+    Legge un file Excel da un oggetto BytesIO in un DataFrame pandas.
+    Seleziona tutti i fogli di lavoro e cerca la colonna 'Giudizio'.
+    Ignora i fogli che non contengono la colonna.
 
     Args:
-        file_path (BytesIO): Il file Excel caricato in memoria.
+        file_path (BytesIO): L'oggetto BytesIO del file Excel.
         progress_container (callable): Funzione per inviare messaggi di stato.
-
-    Returns:
-        list: Una lista di nomi dei fogli di lavoro.
-    """
-    try:
-        workbook = openpyxl.load_workbook(file_path, read_only=True)
-        sheet_names = workbook.sheetnames
-        workbook.close()
-        return sheet_names
-    except Exception as e:
-        progress_container(f"Errore nella lettura dei fogli di lavoro: {e}")
-        return []
-
-def read_excel_file_to_df(file_path, progress_container, sheet_name=None, read_only=False):
-    """
-    Legge i dati da un file Excel e li converte in un DataFrame, cercando l'intestazione
-    corretta e la colonna 'Giudizio'.
-
-    Args:
-        file_path (BytesIO): Il file Excel caricato in memoria.
-        progress_container (callable): Funzione per inviare messaggi di stato.
-        sheet_name (str, optional): Il nome specifico del foglio da leggere.
-        read_only (bool, optional): Se True, elabora solo le righe con colonna 'Giudizio' vuota.
-
-    Returns:
-        pd.DataFrame: Un DataFrame contenente 'input_text' e 'target_text'
-                      o un DataFrame vuoto se fallisce.
-    """
-    try:
-        if sheet_name:
-            sheets_to_process = [sheet_name]
-        else:
-            sheets_to_process = get_excel_sheet_names(file_path, progress_container)
-            if not sheets_to_process:
-                progress_container("Nessun foglio di lavoro trovato.", "error")
-                return pd.DataFrame()
         
+    Returns:
+        pd.DataFrame: Un DataFrame combinato di tutti i dati validi, o un
+                      DataFrame vuoto in caso di errore.
+    """
+    try:
         corpus_list = []
-        for sheet in sheets_to_process:
+        
+        # Legge tutti i fogli del file
+        file_path.seek(0)
+        all_sheets_df = pd.read_excel(file_path, sheet_name=None)
+        
+        for sheet in all_sheets_df:
             try:
-                # Trova la riga dell'intestazione per il foglio corrente
-                header_row_index = find_header_row(file_path, sheet)
-                if header_row_index == -1:
-                    progress_container(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet}'. Questo foglio verrà saltato.", "warning")
-                    continue
+                progress_container(f"Analisi del foglio: '{sheet}'...", "info")
+                df = all_sheets_df[sheet]
                 
-                # Legge il foglio in un DataFrame a partire dalla riga dell'intestazione
-                df = pd.read_excel(file_path, sheet_name=sheet, header=header_row_index, engine='openpyxl')
-                
-                # Trova di nuovo il nome esatto della colonna 'Giudizio'
+                # Trova la colonna 'Giudizio'
                 giudizio_col = find_giudizio_column(df)
+                
                 if not giudizio_col:
                     progress_container(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet}'. Questo foglio verrà saltato.", "warning")
                     continue
                 
-                # Logica per elaborare solo le righe con 'Giudizio' vuoto in modalità read_only
-                if read_only:
-                    df = df[df[giudizio_col].isna()]
-                    if df.empty:
-                        progress_container(f"Attenzione: Nessuna riga da completare trovata nel foglio '{sheet}'.", "warning")
-                        continue
-
+                # Rimuove le righe dove il giudizio è vuoto o non è una stringa
+                df = df[df[giudizio_col].apply(lambda x: isinstance(x, str) and x.strip() != '')]
+                
+                if df.empty:
+                    progress_container(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet}'. Questo foglio verrà saltato.", "warning")
+                    continue
+                    
+                # Costruisce il dataset per l'addestramento
                 data_for_dataset = []
                 for index, row in df.iterrows():
                     # Rimuove la colonna 'Giudizio' per creare l'input_text
@@ -159,3 +131,4 @@ def read_excel_file_to_df(file_path, progress_container, sheet_name=None, read_o
         progress_container(f"Errore nella lettura del file: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         return pd.DataFrame()
+
