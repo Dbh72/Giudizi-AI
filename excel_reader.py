@@ -104,7 +104,7 @@ def read_and_prepare_data_from_excel(uploaded_file, progress_container):
             corpus_list.extend(data_for_dataset)
         
         if not corpus_list:
-            progress_container("Nessun dato valido trovato in tutti i fogli del file.", "error")
+            progress_container("Nessun dato valido trovato in tutti i foghi del file.", "error")
             return pd.DataFrame()
         
         progress_container(f"Trovate {len(corpus_list)} righe di dati valide per l'addestramento.", "success")
