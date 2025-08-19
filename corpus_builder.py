@@ -32,11 +32,13 @@ def build_or_update_corpus(new_df, progress_container):
 
         if not new_df.empty:
             progress_container(f"Trovate {len(new_df)} nuove righe da aggiungere.", "info")
-            corpus_df = pd.concat([corpus_df, new_df], ignore_index=True)
-            corpus_df.drop_duplicates(subset=['input_text'], inplace=True)
-            progress_container(f"Corpus aggiornato. Totale righe: {len(corpus_df)}", "success")
-            corpus_df.to_parquet(CORPUS_FILE, index=False)
-            progress_container("Corpus salvato con successo.", "success")
+            
+            # Aggiunge i nuovi dati al corpus esistente
+            updated_corpus = pd.concat([corpus_df, new_df], ignore_index=True)
+            updated_corpus.to_parquet(CORPUS_FILE, index=False)
+            
+            progress_container(f"Corpus aggiornato. Righe totali: {len(updated_corpus)}", "success")
+            return updated_corpus
         else:
             progress_container("Nessun dato valido nel nuovo file. Il corpus non è stato aggiornato.", "warning")
 
@@ -74,4 +76,3 @@ def load_corpus(progress_container):
         progress_container(f"Errore durante il caricamento del corpus: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         return pd.DataFrame()
-
