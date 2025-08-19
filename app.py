@@ -187,24 +187,25 @@ def generate_judgments_on_excel(excel_file, selected_sheet, progress_container):
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         st.session_state.process_completed_file = None
 
+@st.cache_resource
 def load_model_on_init():
     """
     Carica il modello fine-tuned all'avvio dell'applicazione.
+    Usa st.cache_resource per caricarlo solo una volta.
     """
-    if not st.session_state.model_ready:
-        progress_container("Caricamento del modello fine-tuned. Attendere...", "info")
-        model, tokenizer = jg.load_finetuned_model(OUTPUT_DIR, progress_container)
-        
-        if model and tokenizer:
-            st.session_state.model = model
-            st.session_state.tokenizer = tokenizer
-            st.session_state.model_ready = True
-            st.session_state.model_trained = True
-            progress_container("Modello pronto per la generazione di giudizi.", "success")
-        else:
-            st.session_state.model_ready = False
-            st.session_state.model_trained = False
-            progress_container("Nessun modello fine-tuned trovato. Addestra un modello per abilitare la generazione.", "warning")
+    progress_container("Caricamento del modello fine-tuned. Attendere...", "info")
+    model, tokenizer = jg.load_finetuned_model(OUTPUT_DIR, progress_container)
+    
+    if model and tokenizer:
+        st.session_state.model = model
+        st.session_state.tokenizer = tokenizer
+        st.session_state.model_ready = True
+        st.session_state.model_trained = True
+        progress_container("Modello pronto per la generazione di giudizi.", "success")
+    else:
+        st.session_state.model_ready = False
+        st.session_state.model_trained = False
+        progress_container("Nessun modello fine-tuned trovato. Addestra un modello per abilitare la generazione.", "warning")
 
 # ==============================================================================
 # SEZIONE 2: INTERFACCIA UTENTE DI STREAMLIT
@@ -214,8 +215,7 @@ def load_model_on_init():
 initialize_state()
 
 # Caricamento del modello una tantum all'avvio
-if not st.session_state.model_ready:
-    st.experimental_singleton(load_model_on_init)()
+load_model_on_init()
 
 st.set_page_config(
     page_title="Generatore Giudizi Scolastici",
@@ -327,4 +327,3 @@ if st.session_state.model_trained:
         )
 else:
     st.warning("Per generare i giudizi, devi prima addestrare un modello nella sezione '1. Addestramento del Modello'.")
-
