@@ -36,49 +36,50 @@ class SaveEveryNStepsCallback(TrainerCallback):
         super().__init__()
         self.output_dir = output_dir
         self.save_steps = save_steps
-        self.last_step = 0
-
+        
     def on_step_end(self, args, state, control, **kwargs):
-        """
-        Controlla se è il momento di salvare il checkpoint.
-        """
-        if state.global_step % self.save_steps == 0 and state.global_step > self.last_step:
-            checkpoint_dir = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
-            print(f"Salvataggio checkpoint a passo {state.global_step} in {checkpoint_dir}")
-            kwargs['model'].save_pretrained(checkpoint_dir)
-            kwargs['tokenizer'].save_pretrained(checkpoint_dir)
-            self.last_step = state.global_step
-            
+        if state.global_step % self.save_steps == 0:
+            output_checkpoint_dir = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
+            kwargs["model"].save_pretrained(output_checkpoint_dir)
+            if kwargs.get("tokenizer"):
+                kwargs["tokenizer"].save_pretrained(output_checkpoint_dir)
+
+def find_latest_checkpoint(path):
+    """
+    Trova l'ultimo checkpoint salvato per riprendere l'addestramento.
+    """
+    if not os.path.exists(path):
+        return None
+    
+    checkpoints = [d for d in os.listdir(path) if d.startswith("checkpoint-")]
+    if not checkpoints:
+        return None
+    
+    latest_checkpoint = max(checkpoints, key=lambda cp: int(cp.split('-')[1]))
+    return os.path.join(path, latest_checkpoint)
+
 # ==============================================================================
-# SEZIONE 3: FUNZIONI PRINCIPALI
+# SEZIONE 3: FUNZIONE DI FINE-TUNING
 # ==============================================================================
 
-def fine_tune(corpus_df, progress_container):
+def fine_tune_model(corpus_df, progress_container):
     """
-    Esegue il fine-tuning del modello.
+    Esegue il fine-tuning del modello di linguaggio sul corpus fornito.
     """
     try:
-        progress_container("Inizio del processo di fine-tuning...", "info")
-        
-        # Step 1: Preparazione del dataset
-        progress_container("Preparazione del dataset...", "info")
-        if corpus_df.empty:
-            progress_container("Errore: Il DataFrame del corpus è vuoto. Impossibile addestrare il modello.", "error")
-            return None, None
-            
-        dataset = Dataset.from_pandas(corpus_df)
-        dataset = dataset.train_test_split(test_size=0.1)
-        train_dataset = dataset['train']
-        eval_dataset = dataset['test']
-        
-        # Step 2: Caricamento del modello e del tokenizer
-        progress_container(f"Caricamento del modello base '{MODEL_NAME}'...", "info")
+        # Step 1: Inizializza il tokenizer e il modello
+        progress_container("Inizializzazione del tokenizer e del modello...", "info")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
 
-        # Step 3: Configurazione PEFT (LoRa) e TrainingArguments
-        progress_container("Configurazione di PEFT (LoRa)...", "info")
-        
+        # Step 2: Prepara il dataset
+        progress_container("Preparazione del dataset di addestramento...", "info")
+        dataset = Dataset.from_pandas(corpus_df)
+        dataset = dataset.train_test_split(test_size=0.1)
+        train_dataset = dataset["train"]
+        eval_dataset = dataset["test"]
+
+        # Step 3: Configura PEFT (LoRA)
         peft_config = LoraConfig(
             task_type=TaskType.SEQ_2_SEQ_LM,
             inference_mode=False,
@@ -90,31 +91,30 @@ def fine_tune(corpus_df, progress_container):
         peft_model = get_peft_model(model, peft_config)
         peft_model.print_trainable_parameters()
 
-        # Verifica la presenza di checkpoint precedenti
-        last_checkpoint = None
-        if os.path.isdir(OUTPUT_DIR):
-            checkpoints = [d for d in os.listdir(OUTPUT_DIR) if d.startswith('checkpoint-')]
-            if checkpoints:
-                last_checkpoint_path = max([os.path.join(OUTPUT_DIR, d) for d in checkpoints], key=os.path.getmtime)
-                last_checkpoint = last_checkpoint_path
-                progress_container(f"Trovato un checkpoint precedente: {last_checkpoint}", "info")
-            
+        # Step 4: Configura e avvia l'addestramento
         training_args = TrainingArguments(
             output_dir=OUTPUT_DIR,
-            num_train_epochs=5,
-            per_device_train_batch_size=2,
-            per_device_eval_batch_size=2,
-            warmup_steps=50,
-            weight_decay=0.01,
+            auto_find_batch_size=True,
+            learning_rate=3e-4,
+            num_train_epochs=1,
             logging_dir=f"{OUTPUT_DIR}/logs",
+            logging_strategy="steps",
             logging_steps=50,
+            save_strategy="steps",
             save_steps=500,
-            eval_steps=500,
-            evaluation_strategy="steps", # Correzione: `evaluation_strategy`
-            load_best_model_at_end=True,
-            report_to="none"
+            per_device_train_batch_size=1,
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=8,
+            evaluation_strategy="steps",
+            eval_steps=500
         )
         
+        last_checkpoint = find_latest_checkpoint(OUTPUT_DIR)
+        if last_checkpoint:
+            progress_container(f"Trovato l'ultimo checkpoint: {last_checkpoint}. Riprendo l'addestramento...", "info")
+        else:
+            progress_container("Nessun checkpoint trovato. Avvio un nuovo addestramento...", "info")
+            
         progress_container("Avvio del processo di addestramento...", "info")
         trainer = Trainer(
             model=peft_model,
@@ -142,7 +142,5 @@ def fine_tune(corpus_df, progress_container):
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         # Rimuove la directory del modello se l'addestramento fallisce
         if os.path.exists(OUTPUT_DIR):
-            shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
-            progress_container(f"Directory '{OUTPUT_DIR}' rimossa a causa dell'errore.", "warning")
+            shutil.rmtree(OUTPUT_DIR)
         return None, None
-
