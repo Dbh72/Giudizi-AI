@@ -41,89 +41,103 @@ class SaveEveryNStepsCallback(TrainerCallback):
         self.last_saved_step = -1
 
     def on_step_end(self, args, state, control, **kwargs):
-        """
-        Controlla se è il momento di salvare il modello.
-        """
         if state.global_step % self.save_steps == 0 and state.global_step > self.last_saved_step:
-            save_path = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
-            kwargs['model'].save_pretrained(save_path)
-            kwargs['tokenizer'].save_pretrained(save_path)
-            self.last_saved_step = state.global_step
-            print(f"Modello salvato al checkpoint: {save_path}")
+            try:
+                # Controlla se il modello è un PeftModel e salva la versione PEFT
+                if isinstance(kwargs['model'], PeftModel):
+                    output_checkpoint_dir = os.path.join(self.output_dir, f"checkpoint-{state.global_step}")
+                    kwargs['model'].save_pretrained(output_checkpoint_dir)
+                    kwargs['tokenizer'].save_pretrained(output_checkpoint_dir)
+                    progress_container(None, f"Checkpoint salvato al passo {state.global_step}", "info")
+                    self.last_saved_step = state.global_step
+            except Exception as e:
+                progress_container(None, f"Errore nel salvataggio del checkpoint al passo {state.global_step}: {e}", "error")
 
 class LossLoggingCallback(TrainerCallback):
     """
-    Un callback per loggare la loss durante l'addestramento,
-    utile per il monitoraggio.
+    Un callback personalizzato per stampare la loss ogni N passi
     """
     def on_log(self, args, state, control, logs=None, **kwargs):
-        if state.is_local_process_zero and logs is not None and "loss" in logs:
-            print(f"Step {state.global_step}: Loss = {logs['loss']:.4f}")
-
-# ==============================================================================
-# SEZIONE 3: FUNZIONI PRINCIPALI
-# ==============================================================================
-
-def train_model(train_dataset: Dataset, eval_dataset: Dataset, progress_container):
+        # I log di loss sono disponibili nell'evento on_log
+        if logs is not None and "loss" in logs:
+            progress_container(None, f"Passo {state.global_step}: Loss = {logs['loss']:.4f}", "info")
+            
+# Funzione ausiliaria per la creazione di messaggi di progresso
+def progress_container(status_placeholder, message, type="info"):
     """
-    Esegue il fine-tuning del modello T5.
+    Funzione mock per simulare l'aggiornamento di un placeholder Streamlit.
+    """
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    formatted_message = f"[{timestamp}] {message}"
+    print(formatted_message)
+
+# ==============================================================================
+# SEZIONE 3: FUNZIONE PRINCIPALE DI FINE-TUNING
+# ==============================================================================
+
+def fine_tune_model(corpus_df, progress_container):
+    """
+    Esegue il fine-tuning del modello di linguaggio.
     
-    Argomenti:
-        train_dataset (Dataset): Il set di dati di addestramento.
-        eval_dataset (Dataset): Il set di dati di valutazione.
-        progress_container (function): Funzione per aggiornare lo stato dell'interfaccia utente.
+    Args:
+        corpus_df (pd.DataFrame): Il DataFrame contenente il corpus di addestramento.
+        progress_container (function): Funzione per visualizzare i messaggi di progresso.
+    
+    Returns:
+        tuple: Una tupla contenente il modello e il tokenizer fine-tuned.
     """
     try:
-        # Step 1: Caricamento del modello e del tokenizer
-        progress_container("Caricamento del modello e del tokenizer...", "info")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token="hf_jOQxNlJpQdJbZlJ...")
-        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, token="hf_jOQxNlJpQdJbZlJ...",
-                                                     device_map="auto")
-
-        # Step 2: Configurazione di LoRA
-        progress_container("Configurazione di LoRA...", "info")
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=["q", "v", "k"],  # Moduli del modello su cui applicare LoRA
-            lora_dropout=0.05,
-            bias="none",
-            task_type=TaskType.SEQ_2_SEQ_LM,
-            inference_mode=False
-        )
+        progress_container("Inizializzazione del tokenizer...", "info")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         
-        # Applica LoRA al modello di base
-        peft_model = get_peft_model(model, lora_config)
-        peft_model.print_trainable_parameters()
-
-        # Step 3: Configurazione degli argomenti di addestramento
-        # NOTA: Qui ho rimosso 'evaluation_strategy' e 'eval_steps' in quanto non più supportati
-        # da transformers 4.55.2.
+        progress_container("Preparazione dei dati...", "info")
+        # Inizializza i set di dati
+        data = Dataset.from_pandas(corpus_df)
+        dataset_dict = DatasetDict({
+            'train': data.select(range(int(len(data) * 0.9))),
+            'eval': data.select(range(int(len(data) * 0.1)))
+        })
+        
+        train_dataset = dataset_dict['train']
+        eval_dataset = dataset_dict['eval']
+        
+        progress_container("Caricamento del modello pre-addestrato...", "info")
+        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, device_map="auto")
+        
+        progress_container("Configurazione di PEFT (Parameter-Efficient Fine-Tuning)...", "info")
+        peft_config = LoraConfig(
+            task_type=TaskType.SEQ_2_SEQ_LM,
+            inference_mode=False,
+            r=8,
+            lora_alpha=32,
+            lora_dropout=0.1
+        )
+        peft_model = get_peft_model(model, peft_config)
+        
+        progress_container("Configurazione degli argomenti di addestramento...", "info")
         training_args = TrainingArguments(
             output_dir=OUTPUT_DIR,
             num_train_epochs=50,
             per_device_train_batch_size=1,
             per_device_eval_batch_size=1,
-            gradient_accumulation_steps=8,
-            warmup_steps=50,
+            warmup_steps=500,
             weight_decay=0.01,
-            learning_rate=2e-4,
-            fp16=True,
+            logging_dir=f'{OUTPUT_DIR}/logs',
             logging_steps=100,
+            report_to="none",
             save_strategy="steps",
             save_steps=500,
-            report_to=["none"], # Disabilita i report per evitare errori con W&B, TensorBoard, ecc.
-            seed=42,
-            load_best_model_at_end=False,
-            metric_for_best_model="loss",
+            save_total_limit=3,
+            evaluation_strategy="steps",
+            eval_steps=500,
+            load_best_model_at_end=True
         )
         
-        # Step 4: Avvio del Trainer
-        # Controlla se esistono checkpoint precedenti per riprendere l'addestramento
+        # Cerca l'ultimo checkpoint salvato per riprendere l'addestramento
         last_checkpoint = None
         if os.path.isdir(OUTPUT_DIR):
             dirs = [d for d in os.listdir(OUTPUT_DIR) if os.path.isdir(os.path.join(OUTPUT_DIR, d))]
-            for d in reversed(sorted(dirs)):
+            for d in sorted(dirs, reverse=True):
                 if d.startswith("checkpoint-"):
                     last_checkpoint = os.path.join(OUTPUT_DIR, d)
         
