@@ -89,7 +89,11 @@ def fine_tune_model(corpus_df, progress_container):
     try:
         progress_container("Inizializzazione del tokenizer...", "info")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        
+
+        # Se il tokenizer non ha un token di padding, aggiungilo.
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            
         progress_container("Preparazione dei dati...", "info")
         # Inizializza i set di dati
         data = Dataset.from_pandas(corpus_df)
@@ -97,13 +101,47 @@ def fine_tune_model(corpus_df, progress_container):
             'train': data.select(range(int(len(data) * 0.9))),
             'eval': data.select(range(int(len(data) * 0.1)))
         })
+
+        # Aggiunta della funzione di preprocessing per tokenizzare i dati
+        def preprocess_function(examples):
+            # Assicurati che il tokenizer possa gestire più di una colonna alla volta
+            # Usiamo un approccio di tokenizzazione standard per l'encoder
+            model_inputs = tokenizer(
+                examples["input_text"], 
+                max_length=128, 
+                truncation=True
+            )
+            
+            # Utilizziamo as_target_tokenizer per la tokenizzazione dei label
+            with tokenizer.as_target_tokenizer():
+                labels = tokenizer(
+                    examples["target_text"], 
+                    max_length=128, 
+                    truncation=True
+                )
+            
+            # Aggiungi i label all'output
+            model_inputs["labels"] = labels["input_ids"]
+            
+            return model_inputs
+
+        progress_container("Tokenizzazione del dataset...", "info")
+        tokenized_datasets = dataset_dict.map(
+            preprocess_function, 
+            batched=True
+        )
         
-        train_dataset = dataset_dict['train']
-        eval_dataset = dataset_dict['eval']
-        
+        # Le colonne `input_text` e `target_text` non servono più
+        train_dataset = tokenized_datasets['train'].remove_columns(["input_text", "target_text"])
+        eval_dataset = tokenized_datasets['eval'].remove_columns(["input_text", "target_text"])
+
         progress_container("Caricamento del modello pre-addestrato...", "info")
         model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, device_map="auto")
         
+        # Adattiamo le dimensioni dell'embedding del modello se abbiamo aggiunto un token
+        if tokenizer.pad_token is not None:
+            model.resize_token_embeddings(len(tokenizer))
+
         progress_container("Configurazione di PEFT (Parameter-Efficient Fine-Tuning)...", "info")
         peft_config = LoraConfig(
             task_type=TaskType.SEQ_2_SEQ_LM,
@@ -128,7 +166,6 @@ def fine_tune_model(corpus_df, progress_container):
             save_strategy="steps",
             save_steps=500,
             save_total_limit=3,
-            remove_unused_columns=False, # Riga aggiunta per il fix
         )
         
         # Cerca l'ultimo checkpoint salvato per riprendere l'addestramento
