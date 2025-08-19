@@ -24,41 +24,85 @@ warnings.filterwarnings("ignore")
 # SEZIONE 2: FUNZIONI AUSILIARIE PER LA GENERAZIONE
 # ==============================================================================
 
-def _process_text_in_chunks(model, tokenizer, input_text, max_length=512, chunk_overlap=50):
+def _process_text_in_chunks(model, tokenizer, input_text, progress_container, max_length=512, chunk_overlap=50):
     """
     Processa un testo di input troppo lungo suddividendolo in chunk e generando
     una risposta per ogni chunk, poi riassembla le risposte.
-    """
-    if len(tokenizer.tokenize(input_text)) <= max_length:
-        return _generate_judgment(model, tokenizer, input_text)
-    
-    tokens = tokenizer.encode(input_text, add_special_tokens=False)
-    chunks = []
-    
-    for i in range(0, len(tokens), max_length - chunk_overlap):
-        chunk_tokens = tokens[i:i + max_length]
-        chunks.append(tokenizer.decode(chunk_tokens))
 
-    generated_judgments = [_generate_judgment(model, tokenizer, chunk) for chunk in chunks]
-    return " ".join(generated_judgments)
+    Args:
+        model (PeftModel): Il modello fine-tuned.
+        tokenizer (AutoTokenizer): Il tokenizer del modello.
+        input_text (str): Il testo di input da elaborare.
+        progress_container (callable): Funzione per inviare messaggi di stato.
+        max_length (int): La lunghezza massima di input per ogni chunk.
+        chunk_overlap (int): La sovrapposizione tra i chunk.
 
+    Returns:
+        str: La risposta generata dal modello.
+    """
+    # Tokenizza il testo di input in un formato che il modello può usare
+    tokens = tokenizer(input_text, return_tensors="pt", truncation=False)["input_ids"]
+    
+    # Se il testo non è troppo lungo, lo elabora direttamente
+    if tokens.shape[1] <= max_length:
+        outputs = model.generate(
+            tokens.to(model.device),
+            max_length=max_length,
+            num_beams=4,
+            do_sample=True,
+            top_p=0.9,
+            repetition_penalty=1.2,
+            early_stopping=True
+        )
+        return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-def _generate_judgment(model, tokenizer, input_text):
-    """
-    Genera un singolo giudizio basato su un testo di input.
-    """
-    inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True).to("cuda" if torch.cuda.is_available() else "cpu")
+    # Logica per l'elaborazione a chunk
+    input_chunks = []
+    start = 0
+    end = max_length
+    while start < tokens.shape[1]:
+        chunk = tokens[0, start:end]
+        input_chunks.append(chunk)
+        start += (max_length - chunk_overlap)
+        end = start + max_length
+        if end > tokens.shape[1]:
+            end = tokens.shape[1]
+            if start >= end:
+                break
     
-    with torch.no_grad():
-        outputs = model.generate(**inputs, max_length=512, num_beams=5, early_stopping=True)
+    # Logga che stiamo per iniziare l'elaborazione a chunk
+    progress_container(f"Input troppo lungo ({tokens.shape[1]} token), verrà spezzato in {len(input_chunks)} chunk.", "info")
     
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # Genera una risposta per ogni chunk
+    generated_texts = []
+    for i, chunk in enumerate(input_chunks):
+        progress_container(f"Generazione per il chunk {i+1} su {len(input_chunks)}...", "info")
+        outputs = model.generate(
+            chunk.unsqueeze(0).to(model.device),
+            max_length=max_length,
+            num_beams=4,
+            do_sample=True,
+            top_p=0.9,
+            repetition_penalty=1.2,
+            early_stopping=True
+        )
+        generated_texts.append(tokenizer.decode(outputs[0], skip_special_tokens=True))
+    
+    # Ricombina le risposte dei vari chunk
+    return " ".join(generated_texts)
 
 
 def load_model(model_path, progress_container):
     """
     Carica il modello e il tokenizer fine-tuned, controllando se il percorso
     esiste localmente.
+
+    Args:
+        model_path (str): Il percorso della directory del modello salvato.
+        progress_container (callable): Funzione per inviare messaggi di stato.
+
+    Returns:
+        tuple: (model, tokenizer) o (None, None) se il caricamento fallisce.
     """
     try:
         progress_container(f"Caricamento del modello da: {model_path}...", "info")
@@ -79,95 +123,81 @@ def load_model(model_path, progress_container):
         return model, tokenizer
 
     except Exception as e:
-        progress_container(f"Errore durante il caricamento del modello: {e}", "error")
+        progress_container(f"Errore nel caricamento del modello: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         return None, None
 
 
-def generate_judgments_for_excel(model, tokenizer, file_object, sheet_name, progress_container):
+def generate_judgments_for_file(df, model, tokenizer, progress_container, sheet_name, giudizio_col_name):
     """
-    Genera giudizi per un file Excel utilizzando un modello fine-tuned e salva
-    il risultato in una nuova colonna.
+    Genera i giudizi per ogni riga di un DataFrame.
+
+    Args:
+        df (pd.DataFrame): Il DataFrame con i dati da elaborare.
+        model (PeftModel): Il modello fine-tuned.
+        tokenizer (AutoTokenizer): Il tokenizer del modello.
+        progress_container (callable): Funzione per inviare messaggi di stato.
+        sheet_name (str): Il nome del foglio di lavoro corrente.
+        giudizio_col_name (str): Il nome della colonna 'Giudizio'.
+    
+    Returns:
+        pd.DataFrame: Il DataFrame aggiornato con i giudizi generati.
     """
     try:
-        progress_container("Lettura del file Excel per la generazione dei giudizi...", "info")
+        progress_container(f"Inizio generazione dei giudizi per il foglio '{sheet_name}'.", "info")
         
-        # Usa file_object direttamente per leggere il dataframe
-        df = pd.read_excel(file_object, sheet_name=sheet_name, header=None)
-        
-        # Trova la riga di intestazione e le colonne
-        original_df, giudizio_col_name = find_header_row_and_columns(df)
-        
-        # Se la colonna "Giudizio" non è stata trovata, la crea
-        if giudizio_col_name is None:
-            progress_container("Colonna 'Giudizio' non trovata. Creazione di una nuova colonna.", "warning")
-            giudizio_col_name = 'Giudizio'
-            original_df[giudizio_col_name] = ""
-        else:
-            progress_container("Colonna 'Giudizio' trovata. La userò per la scrittura.", "info")
+        # Determina da dove riprendere il processo
+        start_index = 0
+        if giudizio_col_name in df.columns:
+            # Trova l'ultima riga non nulla nella colonna 'Giudizio'
+            last_judged_row = df[df[giudizio_col_name].notna()].index.max()
+            if not pd.isna(last_judged_row):
+                start_index = last_judged_row + 1
+                progress_container(f"Ripresa della generazione dall'indice {start_index} per la colonna '{giudizio_col_name}'.", "info")
 
-        # Inizializza la colonna dei giudizi se non esiste o è vuota
-        if giudizio_col_name not in original_df.columns:
-            original_df[giudizio_col_name] = ""
-        
-        # Cicla sulle righe del DataFrame
-        for index, row in original_df.iterrows():
-            if pd.notna(row[giudizio_col_name]) and str(row[giudizio_col_name]).strip() != '':
-                progress_container(f"Riga {index+2}: Giudizio già esistente. Saltato.", "info")
-                continue
+        if start_index >= len(df):
+            progress_container("Tutti i giudizi sembrano già essere stati generati. Processo completato.", "success")
+            return df
 
-            input_data = row.drop(labels=[c for c in original_df.columns if isinstance(c, str) and ('giudizio' in c.lower() or 'alunno' in c.lower() or 'assenti' in c.lower() or 'cnt' in c.lower() or 'pos' in c.lower())], errors='ignore')
-            prompt_text = " ".join([f"{col}: {str(val)}" for col, val in input_data.items() if pd.notna(val) and str(val).strip() != ''])
-
-            if not prompt_text.strip():
-                progress_container(f"Riga {index+2}: Dati di input insufficienti. Giudizio non generato.", "warning")
-                original_df.at[index, giudizio_col_name] = "Giudizio non generato (dati insufficienti)"
-                continue
-
-            progress_container(f"Riga {index+2}: Generazione giudizio...", "info")
-            generated_judgment = _process_text_in_chunks(model, tokenizer, prompt_text)
+        # Itera sulle righe del DataFrame
+        for i in range(start_index, len(df)):
+            row = df.iloc[i]
             
-            # Aggiorna la riga con il giudizio generato
-            original_df.at[index, giudizio_col_name] = generated_judgment.strip()
-            progress_container(f"Giudizio generato per la riga {index+2}.", "info")
+            # Costruisci l'input per il modello
+            prompt = " ".join([f"{col}: {str(row[col])}" for col in df.columns if pd.notna(row[col]) and col != giudizio_col_name and not col.lower().startswith(('alunno', 'assenti', 'cnt'))])
+            
+            progress_container(f"Generazione per la riga {i+1}...", "info")
+            
+            # Controlla la lunghezza dell'input e usa il chunking se necessario
+            input_tokens = tokenizer(prompt, return_tensors="pt")
+            max_model_length = 512
+            
+            if input_tokens.input_ids.shape[1] > max_model_length:
+                # Usa la funzione di chunking per non perdere dati, passando il progress_container
+                generated_text = _process_text_in_chunks(model, tokenizer, prompt, progress_container)
+            else:
+                # Usa la generazione standard se l'input non è troppo lungo
+                outputs = model.generate(
+                    input_tokens.input_ids.to(model.device),
+                    max_length=max_model_length,
+                    num_beams=4,
+                    do_sample=True,
+                    top_p=0.9,
+                    repetition_penalty=1.2,
+                    early_stopping=True
+                )
+                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # Aggiungi il giudizio generato al DataFrame
+            df.at[i, giudizio_col_name] = generated_text
+            
+            # Aggiungi un piccolo delay per non sovraccaricare il sistema
+            time.sleep(0.5)
 
-        return original_df
+        progress_container(f"Generazione completata per il foglio '{sheet_name}'.", "success")
+        return df
+
     except Exception as e:
-        progress_container(f"Errore critico durante la generazione dei giudizi: {e}", "error")
+        progress_container(f"Errore nella generazione dei giudizi: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return pd.DataFrame()
-
-def find_header_row_and_columns(df):
-    """
-    Trova la riga di intestazione e le posizioni della colonna 'Giudizio'.
-    """
-    try:
-        for i in range(min(50, len(df))):
-            row = df.iloc[i].astype(str).str.lower()
-            if 'giudizio' in row.values:
-                header_row = df.iloc[i]
-                df.columns = make_columns_unique(header_row.values)
-                df = df.iloc[i+1:].reset_index(drop=True)
-                giudizio_col = next((col for col in df.columns if isinstance(col, str) and 'giudizio' in col.lower()), None)
-                return df, giudizio_col
-        return df, None
-    except Exception as e:
-        print(f"Errore nella ricerca dell'header: {e}")
-        return df, None
-
-def make_columns_unique(columns):
-    """
-    Garantisce che i nomi delle colonne siano unici, aggiungendo un contatore
-    se necessario.
-    """
-    seen = {}
-    new_columns = []
-    for col in columns:
-        original_col = col
-        if original_col in seen:
-            seen[original_col] += 1
-            new_columns.append(f"{original_col}_{seen[original_col]}")
-        else:
-            seen[original_col] = 0
-            new_columns.append(original_col)
-    return new_columns
+        return df
