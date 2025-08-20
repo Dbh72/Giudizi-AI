@@ -40,77 +40,118 @@ def find_header_row_and_columns(df):
     """
     try:
         for i in range(min(50, len(df))):
-            row = df.iloc[i].astype(str).str.lower()
-            if 'giudizio' in row.values:
+            row = df.iloc[i].astype(str)
+            row_lower = row.str.lower()
+            
+            # Cerca una corrispondenza esatta con "giudizio" o una forma simile
+            if 'giudizio' in row_lower.values or 'giudizi' in row_lower.values:
                 header_row = df.iloc[i]
-                df.columns = make_columns_unique(header_row.values)
+                df.columns = make_columns_unique([str(col) for col in header_row])
                 df = df.iloc[i+1:].reset_index(drop=True)
-                giudizio_col = next((col for col in df.columns if isinstance(col, str) and 'giudizio' in col.lower()), None)
-                return df, giudizio_col
-        return df, None
-    except Exception as e:
-        print(f"Errore nella ricerca dell'header: {e}")
-        return df, None
-
-def read_and_prepare_data_from_excel(file_object, sheet_names, progress_container):
-    """
-    Legge un file Excel, ne estrae i dati, crea un corpus di addestramento
-    e lo restituisce come DataFrame.
-    """
-    corpus_list = []
-    
-    try:
-        progress_container(f"Lettura del file Excel: {file_object.name}", "info")
+                
+                giudizio_col = None
+                materia_col = None
+                desc_col = None
+                
+                # Trova i nomi delle colonne in modo robusto
+                for col in df.columns:
+                    if re.match(r"giudizio", str(col).lower()):
+                        giudizio_col = col
+                    elif re.match(r"materia", str(col).lower()):
+                        materia_col = col
+                    elif re.match(r"(?:descrizione|note)", str(col).lower(), re.IGNORECASE):
+                        desc_col = col
+                
+                if not all([materia_col, desc_col]):
+                    return None, None, None, None, "Intestazioni 'Materia' e/o 'Descrizione' non trovate nel foglio."
+                
+                return df, giudizio_col, materia_col, desc_col, None
         
-        for sheet in sheet_names:
-            progress_container(f"Elaborazione del foglio: '{sheet}'...", "info")
-            if "prototipo" in sheet.lower() or "medie" in sheet.lower():
-                progress_container(f"Ignorando il foglio '{sheet}' (prototipo o medie). Saltato.", "warning")
+        return None, None, None, None, "Intestazione non trovata nelle prime 50 righe."
+    except Exception as e:
+        return None, None, None, None, f"Errore nella ricerca dell'intestazione: {e}"
+
+def read_excel_for_training(file_object, sheets, progress_container):
+    """
+    Legge un file Excel per costruire un corpus di addestramento.
+    """
+    try:
+        file_object.seek(0)
+        dfs_list = pd.read_excel(file_object, sheet_name=sheets, engine="openpyxl")
+        corpus_list = []
+        
+        for sheet_name, df in dfs_list.items():
+            progress_container(f"Elaborazione del foglio '{sheet_name}' per il training...", "info")
+            processed_df, giudizio_col, materia_col, desc_col, error_msg = find_header_row_and_columns(df)
+            
+            if error_msg:
+                progress_container(f"Errore nel foglio '{sheet_name}': {error_msg}", "error")
+                continue
+                
+            if not all([giudizio_col, materia_col, desc_col]):
+                progress_container(f"Avviso: Le colonne 'Giudizio', 'Materia' e/o 'Descrizione' non sono state trovate nel foglio '{sheet_name}'. Il foglio verrà saltato.", "warning")
                 continue
             
-            try:
-                file_object.seek(0) # Riporta il puntatore all'inizio del file per ogni foglio
-                df = pd.read_excel(file_object, sheet_name=sheet, header=None)
-                df, giudizio_col = find_header_row_and_columns(df)
-
-                if giudizio_col is None:
-                    progress_container(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet}'. Saltato.", "warning")
-                    continue
-                
-                # Prepara i dati per il dataset
-                data_for_dataset = []
-                for _, row in df.iterrows():
-                    input_data = row.drop(labels=[c for c in df.columns if isinstance(c, str) and ('giudizio' in c.lower() or 'alunno' in c.lower() or 'assenti' in c.lower() or 'cnt' in c.lower() or 'pos' in c.lower())], errors='ignore')
-                    prompt_text = " ".join([f"{col}: {str(val)}" for col, val in input_data.items() if pd.notna(val) and str(val).strip() != ''])
-                    target_text = str(row[giudizio_col]) if pd.notna(row[giudizio_col]) else ""
-
-                    if prompt_text:
-                        data_for_dataset.append({
-                            'input_text': prompt_text,
-                            'target_text': target_text
-                        })
-
-                if not data_for_dataset:
-                    progress_container(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet}'. Saltato.", "warning")
-                    continue
-                
-                corpus_list.extend(data_for_dataset)
+            # Filtra le righe con valori mancanti nelle colonne chiave
+            processed_df.dropna(subset=[giudizio_col, materia_col, desc_col], inplace=True)
+            processed_df = processed_df[processed_df[giudizio_col].astype(str).str.strip() != '']
+            processed_df = processed_df[processed_df[materia_col].astype(str).str.strip() != '']
+            processed_df = processed_df[processed_df[desc_col].astype(str).str.strip() != '']
             
-            except Exception as e:
-                progress_container(f"Errore nella lettura del foglio '{sheet}': {e}", "error")
-                progress_container(f"Traceback: {traceback.format_exc()}", "error")
+            if processed_df.empty:
+                progress_container(f"Nessun dato valido trovato nel foglio '{sheet_name}'. Saltato.", "warning")
+                continue
+            
+            # Costruisci il DataFrame del corpus
+            data_for_dataset = [{
+                'prompt': f"Materia: {row[materia_col]} - Descrizione Giudizio: {row[desc_col]}",
+                'target_text': str(row[giudizio_col])
+            } for index, row in processed_df.iterrows()]
+            
+            corpus_list.extend(data_for_dataset)
         
         if not corpus_list:
-            progress_container("Nessun dato valido trovato in tutti i fogli del file.", "error")
+            progress_container("Nessun dato valido trovato in tutti i fogli del file per il training.", "error")
             return pd.DataFrame()
             
         return pd.DataFrame(corpus_list)
 
     except Exception as e:
-        progress_container(f"Errore nella lettura del file: {e}", "error")
+        progress_container(f"Errore nella lettura del file per il training: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         return pd.DataFrame()
 
+
+def read_excel_for_generation(file_object, sheet_name, progress_container):
+    """
+    Legge un file Excel per la generazione dei giudizi.
+    """
+    try:
+        file_object.seek(0)
+        df = pd.read_excel(file_object, sheet_name=sheet_name, engine="openpyxl")
+        
+        processed_df, giudizio_col, materia_col, desc_col, error_msg = find_header_row_and_columns(df)
+        
+        if error_msg:
+            progress_container(f"Errore: {error_msg}", "error")
+            return pd.DataFrame()
+
+        if processed_df is None:
+            progress_container("Impossibile trovare le colonne necessarie nel file.", "error")
+            return pd.DataFrame()
+        
+        progress_container(f"Trovate le colonne: Giudizio='{giudizio_col}', Materia='{materia_col}', Descrizione='{desc_col}'", "info")
+        
+        # Gestisci il caso in cui la colonna 'Giudizio' è vuota o inesistente
+        if giudizio_col not in processed_df.columns:
+            processed_df[giudizio_col] = ''
+        
+        return processed_df, giudizio_col, materia_col, desc_col
+
+    except Exception as e:
+        progress_container(f"Errore nella lettura del file per la generazione: {e}", "error")
+        progress_container(f"Traceback: {traceback.format_exc()}", "error")
+        return pd.DataFrame(), None, None, None
 
 def get_excel_sheet_names(file_object):
     """
@@ -123,6 +164,4 @@ def get_excel_sheet_names(file_object):
         workbook.close()
         return sheet_names
     except Exception as e:
-        print(f"Errore nel recupero dei nomi dei fogli: {e}")
-        return []
-
+        return [f"Errore: {e}"]

@@ -34,141 +34,85 @@ def _process_text_in_chunks(model, tokenizer, input_text, progress_container, ma
         tokenizer (AutoTokenizer): Il tokenizer del modello.
         input_text (str): Il testo di input da elaborare.
         progress_container (callable): Funzione per inviare messaggi di stato.
-        max_length (int): La lunghezza massima di input per ogni chunk.
-        chunk_overlap (int): La sovrapposizione tra i chunk.
+        max_length (int): Lunghezza massima di ogni chunk.
+        chunk_overlap (int): Sovrapposizione tra i chunk.
 
     Returns:
-        str: La risposta generata dal modello.
-    """
-    # Tokenizza il testo di input in un formato che il modello può usare
-    tokens = tokenizer(input_text, return_tensors="pt", truncation=False)["input_ids"]
-    
-    # Se il testo non è troppo lungo, lo elabora direttamente
-    if tokens.shape[1] <= max_length:
-        outputs = model.generate(
-            tokens.to(model.device),
-            max_length=max_length,
-            num_beams=4,
-            do_sample=True,
-            top_p=0.9,
-            repetition_penalty=1.2,
-            early_stopping=True
-        )
-        return tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    # Logica per l'elaborazione a chunk
-    input_chunks = []
-    start = 0
-    end = max_length
-    while start < tokens.shape[1]:
-        chunk = tokens[0, start:end]
-        input_chunks.append(chunk)
-        start += (max_length - chunk_overlap)
-        end = start + max_length
-        if end > tokens.shape[1]:
-            end = tokens.shape[1]
-            if start >= end:
-                break
-    
-    # Logga che stiamo per iniziare l'elaborazione a chunk
-    progress_container(f"Input troppo lungo ({tokens.shape[1]} token), verrà spezzato in {len(input_chunks)} chunk.", "info")
-    
-    # Genera una risposta per ogni chunk
-    generated_texts = []
-    for i, chunk in enumerate(input_chunks):
-        progress_container(f"Generazione per il chunk {i+1} su {len(input_chunks)}...", "info")
-        outputs = model.generate(
-            chunk.unsqueeze(0).to(model.device),
-            max_length=max_length,
-            num_beams=4,
-            do_sample=True,
-            top_p=0.9,
-            repetition_penalty=1.2,
-            early_stopping=True
-        )
-        generated_texts.append(tokenizer.decode(outputs[0], skip_special_tokens=True))
-    
-    # Ricombina le risposte dei vari chunk
-    return " ".join(generated_texts)
-
-
-def load_model(model_path, progress_container):
-    """
-    Carica il modello e il tokenizer fine-tuned, controllando se il percorso
-    esiste localmente.
-
-    Args:
-        model_path (str): Il percorso della directory del modello salvato.
-        progress_container (callable): Funzione per inviare messaggi di stato.
-
-    Returns:
-        tuple: (model, tokenizer) o (None, None) se il caricamento fallisce.
+        str: Il testo generato riassemblato.
     """
     try:
-        progress_container(f"Caricamento del modello da: {model_path}...", "info")
+        # Tokenizza l'input
+        input_ids = tokenizer.encode(input_text, return_tensors="pt")
+        total_length = input_ids.shape[1]
         
-        # Controlla se il modello esiste localmente
-        if not os.path.exists(model_path):
-            progress_container(f"Errore: La directory del modello '{model_path}' non è stata trovata localmente.", "error")
-            return None, None
-            
-        # Carica il tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        
-        # Carica il modello base e applica gli adattatori PEFT
-        base_model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, device_map="auto")
-        model = PeftModel.from_pretrained(base_model, model_path)
-        
-        progress_container(f"Modello e tokenizer caricati con successo da: {model_path}", "success")
-        return model, tokenizer
+        # Calcola i chunk
+        chunks = []
+        for i in range(0, total_length, max_length - chunk_overlap):
+            chunk = input_ids[0, i:i + max_length]
+            chunks.append(chunk)
 
+        generated_texts = []
+        for i, chunk in enumerate(chunks):
+            progress_container(f"Generazione del chunk {i+1}/{len(chunks)}...", "info")
+            outputs = model.generate(
+                chunk.to(model.device),
+                max_length=max_length,
+                num_beams=4,
+                do_sample=True,
+                top_p=0.9,
+                repetition_penalty=1.2,
+                early_stopping=True
+            )
+            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            generated_texts.append(generated_text)
+
+        # Riassembla le risposte. Per ora, una semplice concatenazione.
+        return " ".join(generated_texts)
+        
     except Exception as e:
-        progress_container(f"Errore nel caricamento del modello: {e}", "error")
+        progress_container(f"Errore nel processare i chunk: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return None, None
+        return ""
 
 
-def generate_judgments_for_file(df, model, tokenizer, progress_container, sheet_name, giudizio_col_name):
+def generate_judgments(df, model, tokenizer, sheet_name, progress_container):
     """
-    Genera i giudizi per ogni riga di un DataFrame.
-
+    Genera i giudizi per ogni riga del DataFrame.
+    
     Args:
-        df (pd.DataFrame): Il DataFrame con i dati da elaborare.
+        df (pd.DataFrame): DataFrame contenente i dati da processare.
         model (PeftModel): Il modello fine-tuned.
         tokenizer (AutoTokenizer): Il tokenizer del modello.
+        sheet_name (str): Il nome del foglio di lavoro in cui si sta lavorando.
         progress_container (callable): Funzione per inviare messaggi di stato.
-        sheet_name (str): Il nome del foglio di lavoro corrente.
-        giudizio_col_name (str): Il nome della colonna 'Giudizio'.
-    
+        
     Returns:
         pd.DataFrame: Il DataFrame aggiornato con i giudizi generati.
     """
     try:
-        progress_container(f"Inizio generazione dei giudizi per il foglio '{sheet_name}'.", "info")
+        # Trova le colonne necessarie
+        processed_df, giudizio_col_name, materia_col, desc_col, error_msg = df, 'Giudizio', 'Materia', 'Descrizione Giudizio', None
         
-        # Determina da dove riprendere il processo
-        start_index = 0
-        if giudizio_col_name in df.columns:
-            # Trova l'ultima riga non nulla nella colonna 'Giudizio'
-            last_judged_row = df[df[giudizio_col_name].notna()].index.max()
-            if not pd.isna(last_judged_row):
-                start_index = last_judged_row + 1
-                progress_container(f"Ripresa della generazione dall'indice {start_index} per la colonna '{giudizio_col_name}'.", "info")
-
-        if start_index >= len(df):
-            progress_container("Tutti i giudizi sembrano già essere stati generati. Processo completato.", "success")
+        if error_msg:
+            progress_container(f"Errore: {error_msg}", "error")
+            return df
+        
+        # Filtra le righe dove il giudizio non è ancora stato generato
+        df_to_process = df[df[giudizio_col_name].astype(str).str.strip() == '']
+        
+        if df_to_process.empty:
+            progress_container("Tutti i giudizi sembrano già essere stati generati per questo foglio.", "warning")
             return df
 
-        # Itera sulle righe del DataFrame
-        for i in range(start_index, len(df)):
-            row = df.iloc[i]
+        progress_container(f"Avvio della generazione per {len(df_to_process)} giudizi...", "info")
+        
+        for i, row in df_to_process.iterrows():
+            progress_container(f"Generazione giudizio per la riga {i+1}...", "info")
             
-            # Costruisci l'input per il modello
-            prompt = " ".join([f"{col}: {str(row[col])}" for col in df.columns if pd.notna(row[col]) and col != giudizio_col_name and not col.lower().startswith(('alunno', 'assenti', 'cnt'))])
+            # Costruisci il prompt per il modello
+            prompt = f"Materia: {row[materia_col]} - Descrizione Giudizio: {row[desc_col]}"
             
-            progress_container(f"Generazione per la riga {i+1}...", "info")
-            
-            # Controlla la lunghezza dell'input e usa il chunking se necessario
+            # Tokenizza l'input
             input_tokens = tokenizer(prompt, return_tensors="pt")
             max_model_length = 512
             
