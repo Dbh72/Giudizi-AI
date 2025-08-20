@@ -16,6 +16,9 @@ from datetime import datetime
 import json
 import time
 from config import OUTPUT_DIR, MODEL_NAME
+import requests
+import re
+from io import BytesIO
 
 # Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
@@ -33,104 +36,157 @@ def _process_text_in_chunks(model, tokenizer, input_text, progress_container, ma
         model (PeftModel): Il modello fine-tuned.
         tokenizer (AutoTokenizer): Il tokenizer del modello.
         input_text (str): Il testo di input da elaborare.
-        progress_container (callable): Funzione per inviare messaggi di progresso.
-        max_length (int): La lunghezza massima di un chunk.
-        chunk_overlap (int): Il numero di token che si sovrappongono tra i chunk.
-
+        progress_container (callable): Funzione per inviare messaggi di stato.
+        max_length (int): La lunghezza massima di ogni chunk.
+        chunk_overlap (int): L'overlap tra i chunk per mantenere il contesto.
+        
     Returns:
         str: Il testo generato riassemblato.
     """
-    try:
-        input_tokens = tokenizer(input_text, return_tensors="pt", truncation=False)
-        input_ids = input_tokens.input_ids[0]
-        
-        chunks = []
-        start = 0
-        while start < len(input_ids):
-            end = min(start + max_length, len(input_ids))
-            chunks.append(input_ids[start:end])
-            if end == len(input_ids):
-                break
-            start += max_length - chunk_overlap
-            
-        generated_texts = []
-        for i, chunk in enumerate(chunks):
-            progress_container(f"Generazione per il chunk {i+1}/{len(chunks)}...", "info")
-            chunk_input_ids = chunk.unsqueeze(0).to(model.device)
-            outputs = model.generate(
-                chunk_input_ids,
-                max_length=max_length,
-                num_beams=4,
-                do_sample=True,
-                top_p=0.9,
-                repetition_penalty=1.2,
-                early_stopping=True
-            )
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            generated_texts.append(generated_text)
-            
-        return " ".join(generated_texts)
+    # Tokenizza l'input
+    input_ids = tokenizer.encode(input_text, return_tensors='pt', truncation=False).to(model.device)
     
-    except Exception as e:
-        progress_container(f"Errore nel processare il testo in chunk: {e}", "error")
-        return ""
+    # Calcola il numero di chunk
+    num_chunks = int(torch.ceil(torch.tensor(input_ids.shape[1] / (max_length - chunk_overlap))))
+    
+    generated_parts = []
+    
+    for i in range(num_chunks):
+        start_index = i * (max_length - chunk_overlap)
+        end_index = min(start_index + max_length, input_ids.shape[1])
+        
+        chunk = input_ids[:, start_index:end_index]
+        
+        # Genera il testo per il chunk
+        outputs = model.generate(
+            chunk,
+            max_length=max_length,
+            num_beams=4,
+            do_sample=True,
+            top_p=0.9,
+            repetition_penalty=1.2,
+            early_stopping=True
+        )
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_parts.append(generated_text)
+        progress_container(f"Generato giudizio per il chunk {i+1}/{num_chunks}.", "info")
+        
+    # Unisce le parti generate
+    full_generated_text = " ".join(generated_parts)
+    return full_generated_text
 
-# ==============================================================================
-# SEZIONE 3: FUNZIONE PRINCIPALE PER LA GENERAZIONE
-# ==============================================================================
-
-def generate_judgments(df, model, tokenizer, giudizio_col_name, input_cols_name, sheet_name, progress_container):
+def get_gemini_api_key():
     """
-    Genera i giudizi per le righe di un DataFrame.
+    Recupera la chiave API di Gemini dal file di configurazione o dall'ambiente.
+    """
+    from config import GEMINI_API_KEY
+    return GEMINI_API_KEY
+
+def generate_judgment_with_gemini(prompt, progress_container):
+    """
+    Genera un giudizio utilizzando l'API di Gemini.
+    """
+    api_key = get_gemini_api_key()
+    if not api_key:
+        progress_container("Chiave API di Gemini non trovata. Impossibile generare giudizi.", "error")
+        return None
+        
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    
+    json_data = {
+        'contents': [
+            {
+                'role': 'user',
+                'parts': [
+                    {'text': prompt},
+                ],
+            },
+        ],
+    }
+
+    try:
+        response = requests.post(
+            f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}',
+            headers=headers,
+            json=json_data,
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get('candidates') and result['candidates'][0].get('content'):
+            return result['candidates'][0]['content']['parts'][0]['text']
+        else:
+            progress_container(f"Risposta API non valida: {result}", "error")
+            return "Errore di generazione."
+            
+    except requests.exceptions.RequestException as e:
+        progress_container(f"Errore nella chiamata all'API di Gemini: {e}", "error")
+        progress_container(f"Traceback: {traceback.format_exc()}", "error")
+        return "Errore di connessione."
+
+# ==============================================================================
+# SEZIONE 3: FUNZIONE PRINCIPALE DI GENERAZIONE
+# ==============================================================================
+
+def generate_judgments(df, model, tokenizer, sheet_name, progress_container):
+    """
+    Itera su un DataFrame e genera giudizi per le righe con 'Giudizio' vuoto.
 
     Args:
-        df (pd.DataFrame): Il DataFrame con i dati da processare.
+        df (DataFrame): Il DataFrame da processare.
         model (PeftModel): Il modello fine-tuned.
         tokenizer (AutoTokenizer): Il tokenizer del modello.
-        giudizio_col_name (str): Il nome della colonna in cui inserire i giudizi.
-        input_cols_name (list): Lista dei nomi delle colonne di input.
         sheet_name (str): Il nome del foglio di lavoro.
-        progress_container (callable): Funzione per inviare messaggi di progresso.
-
-    Returns:
-        pd.DataFrame: Il DataFrame aggiornato con i nuovi giudizi.
-    """
-    try:
-        progress_container(f"Inizio generazione giudizi per il foglio '{sheet_name}'...", "info")
-        df[giudizio_col_name] = ""
+        progress_container (callable): Funzione per inviare messaggi di stato.
         
-        for i, row in df.iterrows():
-            progress_container(f"Generazione giudizio per la riga {i+1}/{len(df)}...", "info")
+    Returns:
+        DataFrame: Il DataFrame aggiornato con i giudizi generati.
+    """
+    progress_container(f"Inizio generazione giudizi per il foglio '{sheet_name}'...", "info")
+    
+    try:
+        # Trova la colonna 'Giudizio'
+        giudizio_col_name = 'Giudizio'
+        
+        # Iterazione sulle righe del DataFrame
+        for i in range(len(df)):
+            descrizione = df.at[i, 'Descrizione']
+            giudizio = df.at[i, giudizio_col_name]
             
-            # Costruisci il prompt combinando le colonne di input
-            prompt = f"generare un giudizio per il seguente testo: "
-            for col in input_cols_name:
-                prompt += f" {row[col]}"
-            
-            input_tokens = tokenizer(prompt, return_tensors="pt")
-            max_model_length = 512
-            
-            if input_tokens.input_ids.shape[1] > max_model_length:
-                # Usa la funzione di chunking per non perdere dati, passando il progress_container
-                generated_text = _process_text_in_chunks(model, tokenizer, prompt, progress_container)
-            else:
-                # Usa la generazione standard se l'input non è troppo lungo
-                outputs = model.generate(
-                    input_tokens.input_ids.to(model.device),
-                    max_length=max_model_length,
-                    num_beams=4,
-                    do_sample=True,
-                    top_p=0.9,
-                    repetition_penalty=1.2,
-                    early_stopping=True
-                )
-                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Aggiungi il giudizio generato al DataFrame
-            df.at[i, giudizio_col_name] = generated_text
-            
-            # Aggiungi un piccolo delay per non sovraccaricare il sistema
-            time.sleep(0.5)
+            # Controlla se il giudizio è vuoto e la descrizione non lo è
+            if pd.isna(giudizio) or not str(giudizio).strip() and pd.notna(descrizione) and str(descrizione).strip():
+                progress_container(f"Generazione giudizio per la riga {i+1}...", "info")
+                
+                # Crea il prompt per il modello
+                prompt = f"Descrizione: {descrizione}\nGiudizio:"
+                
+                # Genera il giudizio
+                input_tokens = tokenizer(prompt, return_tensors="pt")
+                max_model_length = 512
+                
+                if input_tokens.input_ids.shape[1] > max_model_length:
+                    # Usa la funzione di chunking per non perdere dati, passando il progress_container
+                    generated_text = _process_text_in_chunks(model, tokenizer, prompt, progress_container)
+                else:
+                    # Usa la generazione standard se l'input non è troppo lungo
+                    outputs = model.generate(
+                        input_tokens.input_ids.to(model.device),
+                        max_length=max_model_length,
+                        num_beams=4,
+                        do_sample=True,
+                        top_p=0.9,
+                        repetition_penalty=1.2,
+                        early_stopping=True
+                    )
+                    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Aggiungi il giudizio generato al DataFrame
+                df.at[i, giudizio_col_name] = generated_text
+                
+                # Aggiungi un piccolo delay per non sovraccaricare il sistema
+                time.sleep(0.5)
 
         progress_container(f"Generazione completata per il foglio '{sheet_name}'.", "success")
         return df
@@ -138,4 +194,4 @@ def generate_judgments(df, model, tokenizer, giudizio_col_name, input_cols_name,
     except Exception as e:
         progress_container(f"Errore nella generazione dei giudizi: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return pd.DataFrame()
+        return df

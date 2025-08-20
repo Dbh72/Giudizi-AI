@@ -32,9 +32,27 @@ def build_or_update_corpus(new_df, progress_container):
 
         if not new_df.empty:
             progress_container(f"Trovate {len(new_df)} nuove righe da aggiungere.", "info")
-            updated_corpus = pd.concat([corpus_df, new_df], ignore_index=True).drop_duplicates()
-            updated_corpus.to_parquet(CORPUS_FILE)
+            
+            # Filtra il nuovo DataFrame per rimuovere righe con valori mancanti in 'Descrizione' o 'Giudizio'
+            new_df_cleaned = new_df.dropna(subset=['Descrizione', 'Giudizio'])
+            
+            if new_df_cleaned.empty:
+                progress_container("Attenzione: Nessun dato valido (con 'Descrizione' e 'Giudizio') nel nuovo file. Il corpus non è stato aggiornato.", "warning")
+                return corpus_df
+            
+            progress_container(f"Trovate {len(new_df_cleaned)} righe valide da aggiungere.", "info")
+            
+            # Concatena il vecchio corpus con il nuovo
+            updated_corpus = pd.concat([corpus_df, new_df_cleaned], ignore_index=True)
+            
+            # Rimuovi i duplicati
+            updated_corpus.drop_duplicates(subset=['Descrizione', 'Giudizio'], keep='first', inplace=True)
+            
             progress_container(f"Corpus aggiornato. Righe totali: {len(updated_corpus)}", "success")
+            
+            # Salva il corpus aggiornato
+            updated_corpus.to_parquet(CORPUS_FILE, index=False)
+            
             return updated_corpus
         else:
             progress_container("Nessun dato valido nel nuovo file. Il corpus non è stato aggiornato.", "warning")
@@ -70,6 +88,6 @@ def load_corpus(progress_container):
             progress_container("Nessun corpus di addestramento trovato.", "warning")
             return pd.DataFrame()
     except Exception as e:
-        progress_container(f"Errore durante il caricamento del corpus: {e}", "error")
+        progress_container(f"Errore nel caricamento del corpus: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         return pd.DataFrame()

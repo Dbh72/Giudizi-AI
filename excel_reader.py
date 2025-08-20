@@ -40,122 +40,66 @@ def find_header_row_and_columns(df):
     """
     try:
         for i in range(min(50, len(df))):
-            row = df.iloc[i].astype(str)
-            giudizio_col = [col for col in row if 'giudizio' in col.lower()]
-            if giudizio_col:
-                header_row = i
-                df.columns = make_columns_unique(df.iloc[header_row].astype(str))
-                df = df.iloc[header_row:].reset_index(drop=True)
-                giudizio_col_name = giudizio_col[0]
-
-                # Tenta di trovare anche le colonne di input in base ai nomi
-                input_cols = [col for col in df.columns if 'input' in col.lower() or 'testo' in col.lower() or 'descrizione' in col.lower()]
-                if not input_cols:
-                    input_cols = [col for col in df.columns if col != giudizio_col_name]
-                    
-                input_cols_name = input_cols if input_cols else [None]
-
-                return header_row, giudizio_col_name, input_cols_name
+            row = df.iloc[i].astype(str).str.lower()
+            if any(re.search(r'descrizion(?:e|i)?', x) for x in row):
+                desc_col_name = None
+                giudizio_col_name = None
+                
+                # Cerca le colonne 'descrizione' e 'giudizio'
+                for col in row.index:
+                    if re.search(r'descrizion(?:e|i)?', row[col]):
+                        desc_col_name = col
+                    if re.search(r'giudizio', row[col]):
+                        giudizio_col_name = col
+                
+                if desc_col_name:
+                    return i, desc_col_name, giudizio_col_name
+        return None, None, None
     except Exception as e:
-        # Questo errore non dovrebbe bloccare la ricerca, quindi lo stampiamo e continuiamo
-        # progress_container(f"Errore nella ricerca dell'header: {e}", "warning")
-        pass
+        print(f"Errore nella ricerca dell'intestazione: {e}")
+        return None, None, None
 
-    return None, None, None
+# ==============================================================================
+# SEZIONE 2: FUNZIONI PRINCIPALI
+# ==============================================================================
 
-def read_excel_file(file_object, sheet_name, progress_container):
+def read_excel_file(file_object, selected_sheet, progress_container):
     """
-    Legge un file Excel e restituisce un DataFrame di pandas, pulendo i dati.
+    Legge un file Excel, identifica le colonne, estrae i dati rilevanti
+    e restituisce un DataFrame standardizzato.
     """
     try:
-        # Riporta il puntatore all'inizio del file per evitare problemi
         file_object.seek(0)
         
-        # Carica il file, specificando solo il foglio richiesto
-        df = pd.read_excel(file_object, sheet_name=sheet_name, header=None)
+        # Legge tutti i dati del foglio selezionato
+        df = pd.read_excel(file_object, sheet_name=selected_sheet, header=None, engine='openpyxl')
         
         # Trova la riga di intestazione e le colonne
-        header_row, giudizio_col_name, input_cols_name = find_header_row_and_columns(df.copy())
+        header_row_index, desc_col_name, giudizio_col_name = find_header_row_and_columns(df)
         
-        if giudizio_col_name is None:
-            progress_container(f"Attenzione: La colonna 'Giudizio' non è stata trovata nel foglio '{sheet_name}'. Assicurati che il nome sia corretto (es. 'Giudizio', 'giudizio finale', ecc.).", "error")
+        if header_row_index is None:
+            progress_container("Attenzione: Non è stata trovata una riga di intestazione valida con la colonna 'Descrizione'. Assicurati che il file contenga questa intestazione.", "warning")
             return pd.DataFrame()
 
-        # Ricarica il DataFrame con la riga di intestazione corretta
-        df = pd.read_excel(file_object, sheet_name=sheet_name, header=header_row)
+        # Imposta le intestazioni del DataFrame
+        df.columns = make_columns_unique(df.iloc[header_row_index])
         
-        df.columns = make_columns_unique(df.columns.astype(str))
+        # Rimuove le righe prima dell'intestazione e resetta l'indice
+        df = df[header_row_index+1:].reset_index(drop=True)
         
-        giudizio_col_name_unique = [c for c in df.columns if 'giudizio' in c.lower() and c.lower() == giudizio_col_name.lower()][0]
+        # Rinomina le colonne
+        df.rename(columns={
+            desc_col_name: "Descrizione",
+            giudizio_col_name: "Giudizio"
+        }, inplace=True)
         
-        input_cols_name_unique = [c for c in df.columns if c in input_cols_name]
-        
-        if not input_cols_name_unique:
-            progress_container(f"Errore: Nessuna colonna di input (es. 'Testo', 'Descrizione') trovata nel foglio '{sheet_name}'.", "error")
-            return pd.DataFrame()
+        # Se la colonna 'Giudizio' non è stata trovata, la aggiunge
+        if 'Giudizio' not in df.columns:
+            df['Giudizio'] = ""
+            progress_container("Attenzione: Colonna 'Giudizio' non trovata. Verrà creata vuota.", "warning")
 
-        # Se il file ha il formato corretto, lo restituiamo
-        df_valid = df.dropna(subset=[input_cols_name_unique[0]]).copy()
-        
-        return df_valid, giudizio_col_name_unique, input_cols_name_unique
-
-    except Exception as e:
-        progress_container(f"Errore nella lettura del file: {e}", "error")
-        progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return pd.DataFrame(), None, None
-
-def read_training_file(file_object, sheet_names, progress_container):
-    """
-    Legge un file Excel con più fogli e restituisce un DataFrame di pandas
-    per l'addestramento.
-    """
-    try:
-        corpus_list = []
-        file_object.seek(0)
-        
-        for sheet in sheet_names:
-            try:
-                df = pd.read_excel(file_object, sheet_name=sheet, header=None)
-                header_row, giudizio_col_name, input_cols_name = find_header_row_and_columns(df.copy())
-                
-                if giudizio_col_name is None:
-                    progress_container(f"Attenzione: La colonna 'Giudizio' non è stata trovata nel foglio '{sheet}'. Saltato.", "warning")
-                    continue
-                    
-                df_data = pd.read_excel(file_object, sheet_name=sheet, header=header_row)
-                df_data.columns = make_columns_unique(df_data.columns.astype(str))
-                
-                giudizio_col_name_unique = [c for c in df_data.columns if 'giudizio' in c.lower() and c.lower() == giudizio_col_name.lower()][0]
-                input_cols_name_unique = [c for c in df_data.columns if c in input_cols_name]
-                
-                df_data = df_data.dropna(subset=[giudizio_col_name_unique] + input_cols_name_unique).copy()
-
-                data_for_dataset = []
-                for _, row in df_data.iterrows():
-                    source_text_parts = [str(row[col]) for col in input_cols_name_unique]
-                    source_text = " ".join(source_text_parts)
-                    target_text = str(row[giudizio_col_name_unique])
-                    
-                    data_for_dataset.append({
-                        'input_text': source_text,
-                        'target_text': target_text
-                    })
-
-                if not data_for_dataset:
-                    progress_container(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet}'. Saltato.", "warning")
-                    continue
-                
-                corpus_list.extend(data_for_dataset)
-            
-            except Exception as e:
-                progress_container(f"Errore nella lettura del foglio '{sheet}': {e}", "error")
-                progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        
-        if not corpus_list:
-            progress_container("Nessun dato valido trovato in tutti i fogli del file.", "error")
-            return pd.DataFrame()
-            
-        return pd.DataFrame(corpus_list)
+        progress_container("File letto e dati preparati con successo.", "success")
+        return df
 
     except Exception as e:
         progress_container(f"Errore nella lettura del file: {e}", "error")
@@ -174,6 +118,5 @@ def get_excel_sheet_names(file_object):
         workbook.close()
         return sheet_names
     except Exception as e:
-        st.error(f"Errore nella lettura dei fogli del file: {e}")
+        print(f"Errore nella lettura dei nomi dei fogli: {e}")
         return []
-
