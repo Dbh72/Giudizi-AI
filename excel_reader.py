@@ -12,6 +12,10 @@ import shutil
 import json
 from datetime import datetime
 from openpyxl.utils.exceptions import InvalidFileException
+import warnings
+
+# Ignora i FutureWarnings da openpyxl per una console più pulita
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ==============================================================================
 # SEZIONE 1: FUNZIONI AUSILIARIE
@@ -301,6 +305,7 @@ def get_excel_sheet_names(file_object):
     """
     try:
         file_object.seek(0) # Riporta il puntatore all'inizio del file
+        # 'engine=openpyxl' garantisce la compatibilità con xlsx e xlsm
         workbook = openpyxl.load_workbook(file_object, read_only=True)
         sheet_names = workbook.sheetnames
         workbook.close()
