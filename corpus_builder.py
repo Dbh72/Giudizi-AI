@@ -31,3 +31,18 @@ def build_corpus(df, corpus_path):
         df.to_csv(corpus_path, index=False)
     
     print(f"Corpus aggiornato con successo. Dati salvati in: {corpus_path}")
+
+def load_corpus(corpus_path):
+    """
+    Carica un corpus esistente da un file CSV.
+    
+    Args:
+        corpus_path (str): Il percorso del file CSV del corpus.
+        
+    Returns:
+        pd.DataFrame: Il DataFrame del corpus caricato.
+    """
+    if os.path.exists(corpus_path):
+        return pd.read_csv(corpus_path)
+    else:
+        return pd.DataFrame() # Restituisce un DataFrame vuoto se il file non esiste
