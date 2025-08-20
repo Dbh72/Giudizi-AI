@@ -322,6 +322,7 @@ with main_col:
         key="uploader_process"
     )
     
+    # Aggiunto blocco per la selezione del foglio di lavoro per la generazione
     if uploaded_process_file:
         st.session_state.uploaded_process_file = uploaded_process_file
         try:
