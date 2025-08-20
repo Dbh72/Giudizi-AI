@@ -1,189 +1,147 @@
 # ==============================================================================
-# File: model_trainer.py
-# Modulo per l'addestramento (Fine-Tuning) del modello di linguaggio.
-# Questo file contiene la logica per preparare i dati, configurare l'ambiente
-# di addestramento e avviare il processo di fine-tuning.
+# File: judgment_generator.py
+# Modulo per la generazione dei giudizi utilizzando un modello fine-tuned.
 # ==============================================================================
 
 # SEZIONE 1: LIBRERIE NECESSARIE
 # ==============================================================================
-# Importiamo tutte le librerie essenziali per l'addestramento.
+import os
 import torch
 import warnings
-from datasets import Dataset, DatasetDict
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, TrainingArguments, Trainer, DataCollatorForSeq2Seq
-from peft import LoraConfig, get_peft_model, TaskType, PeftModel
-import os
-import shutil
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from peft import PeftModel
+import pandas as pd
 import traceback
 from datetime import datetime
-from transformers.trainer_callback import TrainerCallback
 import json
-import pandas as pd
+import time
 from config import OUTPUT_DIR, MODEL_NAME
 
-# Ignoriamo i FutureWarning per una console più pulita.
+# Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
 
 # ==============================================================================
-# SEZIONE 2: CLASSI E CALLBACK PERSONALIZZATI
+# SEZIONE 2: FUNZIONI AUSILIARIE PER LA GENERAZIONE
 # ==============================================================================
 
-class LossLoggingCallback(TrainerCallback):
+def _process_text_in_chunks(model, tokenizer, input_text, progress_container, max_length=512, chunk_overlap=50):
     """
-    Callback per stampare la loss di addestramento ogni 100 passi.
-    """
-    def on_step_end(self, args, state, control, **kwargs):
-        if state.global_step % 100 == 0:
-            print(f"Passo {state.global_step}: Loss = {state.global_step_loss}")
-
-
-# ==============================================================================
-# SEZIONE 3: FUNZIONI PRINCIPALI
-# ==============================================================================
-
-def fine_tune_model(corpus_df, progress_container, training_args=None):
-    """
-    Esegue il fine-tuning del modello di linguaggio.
+    Processa un testo di input troppo lungo suddividendolo in chunk e generando
+    una risposta per ogni chunk, poi riassembla le risposte.
 
     Args:
-        corpus_df (pd.DataFrame): DataFrame contenente i dati di addestramento.
-        progress_container (callable): Funzione per inviare messaggi di stato a Streamlit.
-        training_args (TrainingArguments, optional): Argomenti di addestramento.
-                                                    Se None, vengono usati i valori di default.
+        model (PeftModel): Il modello fine-tuned.
+        tokenizer (AutoTokenizer): Il tokenizer del modello.
+        input_text (str): Il testo di input da elaborare.
+        progress_container (callable): Funzione per inviare messaggi di stato.
+        max_length (int): Lunghezza massima di ogni chunk.
+        chunk_overlap (int): Sovrapposizione tra i chunk.
 
     Returns:
-        tuple: Il modello e il tokenizer fine-tunati.
+        str: Il testo generato riassemblato.
     """
     try:
-        if corpus_df.empty:
-            progress_container("Il corpus è vuoto. Impossibile avviare l'addestramento.", "error")
-            return None, None
+        # Tokenizza l'input
+        input_ids = tokenizer.encode(input_text, return_tensors="pt")
+        total_length = input_ids.shape[1]
+        
+        # Calcola i chunk
+        chunks = []
+        for i in range(0, total_length, max_length - chunk_overlap):
+            chunk = input_ids[0, i:i + max_length]
+            chunks.append(chunk)
 
-        progress_container("Avvio del processo di fine-tuning...", "info")
-
-        # Step 1: Carica il modello e il tokenizer
-        progress_container(f"Caricamento del modello base: {MODEL_NAME}...", "info")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
-
-        # Assicuriamoci che il tokenizer abbia un pad_token
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-            progress_container("Aggiunto pad_token al tokenizer.", "info")
-
-        # Step 2: Prepara il dataset per l'addestramento
-        progress_container("Preparazione del dataset...", "info")
-        dataset = Dataset.from_pandas(corpus_df)
-        dataset = dataset.train_test_split(test_size=0.1, seed=42)
-        train_dataset = dataset["train"]
-        eval_dataset = dataset["test"]
-
-        # Step 3: Configura il modello con PEFT (LoRA)
-        progress_container("Configurazione del modello con PEFT...", "info")
-        peft_config = LoraConfig(
-            task_type=TaskType.SEQ_2_SEQ_LM,
-            inference_mode=False,
-            r=8,
-            lora_alpha=32,
-            lora_dropout=0.1,
-            target_modules=["q", "v"]
-        )
-        peft_model = get_peft_model(model, peft_config)
-        peft_model.print_trainable_parameters()
-
-        # Step 4: Configura e avvia il Trainer
-        progress_container("Configurazione del Trainer...", "info")
-        if training_args is None:
-            training_args = TrainingArguments(
-                output_dir=OUTPUT_DIR,
-                per_device_train_batch_size=4,
-                per_device_eval_batch_size=4,
-                learning_rate=3e-4,
-                num_train_epochs=10,
-                evaluation_strategy="steps",
-                eval_steps=500,
-                logging_steps=100,
-                save_steps=500,
-                save_total_limit=3,
-                load_best_model_at_end=True,
-                report_to="none",  # Disabilita i report per semplicità
-                bf16=torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 # Abilita bf16 se disponibile
+        generated_texts = []
+        for i, chunk in enumerate(chunks):
+            progress_container(f"Generazione del chunk {i+1}/{len(chunks)}...", "info")
+            outputs = model.generate(
+                chunk.to(model.device),
+                max_length=max_length,
+                num_beams=4,
+                do_sample=True,
+                top_p=0.9,
+                repetition_penalty=1.2,
+                early_stopping=True
             )
+            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            generated_texts.append(generated_text)
 
-        # Verifica se esiste un checkpoint precedente e riprendi da lì
-        last_checkpoint = None
-        if os.path.exists(OUTPUT_DIR):
-            dirs = os.listdir(OUTPUT_DIR)
-            for d in sorted(dirs, reverse=True):
-                if d.startswith("checkpoint-"):
-                    last_checkpoint = os.path.join(OUTPUT_DIR, d)
-                    progress_container(f"Riprendendo l'addestramento dall'ultimo checkpoint: {last_checkpoint}", "info")
-                    break
+        # Riassembla le risposte. Per ora, una semplice concatenazione.
+        return " ".join(generated_texts)
         
-        progress_container("Avvio del processo di addestramento...", "info")
-        trainer = Trainer(
-            model=peft_model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            data_collator=DataCollatorForSeq2Seq(tokenizer, model=peft_model),
-            callbacks=[LossLoggingCallback()] # Abbiamo rimosso il callback personalizzato per il salvataggio
-        )
-
-        trainer.train(resume_from_checkpoint=last_checkpoint)
-        
-        # Step 5: Salva il modello finale
-        progress_container("Addestramento completato. Salvataggio del modello finale...", "info")
-        final_model_path = os.path.join(OUTPUT_DIR, "final_model")
-        
-        # Salva il modello e il tokenizer
-        # Il Trainer di Hugging Face gestisce già il salvataggio corretto di modello e tokenizer
-        trainer.save_model(final_model_path)
-        
-        # Salva lo stato del trainer
-        trainer.save_state()
-        
-        progress_container(f"Modello e tokenizer finali salvati in: {final_model_path}", "success")
-        return peft_model, tokenizer
-    
     except Exception as e:
-        progress_container(f"Errore durante l'addestramento: {e}", "error")
+        progress_container(f"Errore nel processare i chunk: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return None, None
+        return ""
 
-def load_fine_tuned_model(progress_container):
+
+def generate_judgments(df, model, tokenizer, sheet_name, progress_container):
     """
-    Carica un modello fine-tuned e il suo tokenizer da una directory.
+    Genera i giudizi per ogni riga del DataFrame.
+    
+    Args:
+        df (pd.DataFrame): DataFrame contenente i dati da processare.
+        model (PeftModel): Il modello fine-tuned.
+        tokenizer (AutoTokenizer): Il tokenizer del modello.
+        sheet_name (str): Il nome del foglio di lavoro in cui si sta lavorando.
+        progress_container (callable): Funzione per inviare messaggi di stato.
+        
+    Returns:
+        pd.DataFrame: Il DataFrame aggiornato con i giudizi generati.
     """
     try:
-        model_path = os.path.join(OUTPUT_DIR, "final_model")
-        progress_container(f"Caricamento del modello fine-tuned da: {model_path}...", "info")
+        # Trova le colonne necessarie
+        processed_df, giudizio_col_name, materia_col, desc_col, error_msg = df, 'Giudizio', 'Materia', 'Descrizione Giudizio', None
         
-        # Carica il tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        if error_msg:
+            progress_container(f"Errore: {error_msg}", "error")
+            return df
         
-        # Carica il modello base
-        base_model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, torch_dtype=torch.float32)
+        # Filtra le righe dove il giudizio non è ancora stato generato
+        df_to_process = df[df[giudizio_col_name].astype(str).str.strip() == '']
         
-        # Carica l'adattatore PEFT
-        model = PeftModel.from_pretrained(base_model, model_path)
-        
-        progress_container("Modello e tokenizer caricati con successo.", "success")
-        return model, tokenizer
-        
-    except Exception as e:
-        progress_container(f"Errore nel caricamento del modello: {e}. Il modello potrebbe non essere stato ancora addestrato.", "error")
-        progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return None, None
-        
-def delete_model(progress_container):
-    """
-    Elimina la directory del modello fine-tuned.
-    """
-    if os.path.exists(OUTPUT_DIR):
-        shutil.rmtree(OUTPUT_DIR)
-        progress_container("Modello addestrato eliminato.", "success")
-    else:
-        progress_container("Nessun modello da eliminare.", "warning")
+        if df_to_process.empty:
+            progress_container("Tutti i giudizi sembrano già essere stati generati per questo foglio.", "warning")
+            return df
 
+        progress_container(f"Avvio della generazione per {len(df_to_process)} giudizi...", "info")
+        
+        for i, row in df_to_process.iterrows():
+            progress_container(f"Generazione giudizio per la riga {i+1}...", "info")
+            
+            # Costruisci il prompt per il modello
+            prompt = f"Materia: {row[materia_col]} - Descrizione Giudizio: {row[desc_col]}"
+            
+            # Tokenizza l'input
+            input_tokens = tokenizer(prompt, return_tensors="pt")
+            max_model_length = 512
+            
+            if input_tokens.input_ids.shape[1] > max_model_length:
+                # Usa la funzione di chunking per non perdere dati, passando il progress_container
+                generated_text = _process_text_in_chunks(model, tokenizer, prompt, progress_container)
+            else:
+                # Usa la generazione standard se l'input non è troppo lungo
+                outputs = model.generate(
+                    input_tokens.input_ids.to(model.device),
+                    max_length=max_model_length,
+                    num_beams=4,
+                    do_sample=True,
+                    top_p=0.9,
+                    repetition_penalty=1.2,
+                    early_stopping=True
+                )
+                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # Aggiungi il giudizio generato al DataFrame
+            df.at[i, giudizio_col_name] = generated_text
+            
+            # Aggiungi un piccolo delay per non sovraccaricare il sistema
+            time.sleep(0.5)
+
+        progress_container(f"Generazione completata per il foglio '{sheet_name}'.", "success")
+        return df
+
+    except Exception as e:
+        progress_container(f"Errore nella generazione dei giudizi: {e}", "error")
+        progress_container(f"Traceback: {traceback.format_exc()}", "error")
+        return df

@@ -1,147 +1,74 @@
 # ==============================================================================
 # File: judgment_generator.py
-# Modulo per la generazione dei giudizi utilizzando un modello fine-tuned.
+# Modulo per la generazione dei giudizi utilizzando il modello fine-tunato.
 # ==============================================================================
 
-# SEZIONE 1: LIBRERIE NECESSARIE
-# ==============================================================================
-import os
-import torch
+import streamlit as st
 import warnings
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-from peft import PeftModel
 import pandas as pd
-import traceback
-from datetime import datetime
-import json
-import time
-from config import OUTPUT_DIR, MODEL_NAME
+import torch
 
 # Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
 
-# ==============================================================================
-# SEZIONE 2: FUNZIONI AUSILIARIE PER LA GENERAZIONE
-# ==============================================================================
+# Definiamo le costanti per il progetto
+OUTPUT_DIR = "./modello_finetunato"
+MODEL_NAME = "t5-small"
 
-def _process_text_in_chunks(model, tokenizer, input_text, progress_container, max_length=512, chunk_overlap=50):
+def progress_container_stub(*args, **kwargs):
+    """Funzione placeholder per evitare errori se non in ambiente Streamlit."""
+    pass
+
+def generate_judgments(df, model, tokenizer, status_placeholder):
     """
-    Processa un testo di input troppo lungo suddividendolo in chunk e generando
-    una risposta per ogni chunk, poi riassembla le risposte.
-
-    Args:
-        model (PeftModel): Il modello fine-tuned.
-        tokenizer (AutoTokenizer): Il tokenizer del modello.
-        input_text (str): Il testo di input da elaborare.
-        progress_container (callable): Funzione per inviare messaggi di stato.
-        max_length (int): Lunghezza massima di ogni chunk.
-        chunk_overlap (int): Sovrapposizione tra i chunk.
-
-    Returns:
-        str: Il testo generato riassemblato.
-    """
-    try:
-        # Tokenizza l'input
-        input_ids = tokenizer.encode(input_text, return_tensors="pt")
-        total_length = input_ids.shape[1]
-        
-        # Calcola i chunk
-        chunks = []
-        for i in range(0, total_length, max_length - chunk_overlap):
-            chunk = input_ids[0, i:i + max_length]
-            chunks.append(chunk)
-
-        generated_texts = []
-        for i, chunk in enumerate(chunks):
-            progress_container(f"Generazione del chunk {i+1}/{len(chunks)}...", "info")
-            outputs = model.generate(
-                chunk.to(model.device),
-                max_length=max_length,
-                num_beams=4,
-                do_sample=True,
-                top_p=0.9,
-                repetition_penalty=1.2,
-                early_stopping=True
-            )
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            generated_texts.append(generated_text)
-
-        # Riassembla le risposte. Per ora, una semplice concatenazione.
-        return " ".join(generated_texts)
-        
-    except Exception as e:
-        progress_container(f"Errore nel processare i chunk: {e}", "error")
-        progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return ""
-
-
-def generate_judgments(df, model, tokenizer, sheet_name, progress_container):
-    """
-    Genera i giudizi per ogni riga del DataFrame.
+    Genera i giudizi per un DataFrame dato utilizzando il modello fine-tunato.
     
     Args:
-        df (pd.DataFrame): DataFrame contenente i dati da processare.
-        model (PeftModel): Il modello fine-tuned.
-        tokenizer (AutoTokenizer): Il tokenizer del modello.
-        sheet_name (str): Il nome del foglio di lavoro in cui si sta lavorando.
-        progress_container (callable): Funzione per inviare messaggi di stato.
+        df (pd.DataFrame): Il DataFrame da processare.
+        model: Il modello fine-tunato.
+        tokenizer: Il tokenizer del modello.
+        status_placeholder: Il placeholder di Streamlit per mostrare i progressi.
         
     Returns:
-        pd.DataFrame: Il DataFrame aggiornato con i giudizi generati.
+        pd.DataFrame: Il DataFrame con la colonna 'Giudizio' aggiunta.
     """
-    try:
-        # Trova le colonne necessarie
-        processed_df, giudizio_col_name, materia_col, desc_col, error_msg = df, 'Giudizio', 'Materia', 'Descrizione Giudizio', None
-        
-        if error_msg:
-            progress_container(f"Errore: {error_msg}", "error")
-            return df
-        
-        # Filtra le righe dove il giudizio non è ancora stato generato
-        df_to_process = df[df[giudizio_col_name].astype(str).str.strip() == '']
-        
-        if df_to_process.empty:
-            progress_container("Tutti i giudizi sembrano già essere stati generati per questo foglio.", "warning")
-            return df
+    progress_container = st.session_state.get('progress_container', progress_container_stub)
+    
+    # Assicurati che le colonne 'source' e 'target' esistano
+    if 'source' not in df.columns or 'target' not in df.columns:
+        progress_container(status_placeholder, "Errore: Il file Excel deve contenere le colonne 'source' e 'target'.", "error")
+        return None
 
-        progress_container(f"Avvio della generazione per {len(df_to_process)} giudizi...", "info")
+    progress_container(status_placeholder, "Inizio della generazione dei giudizi...", "info")
+    
+    generated_judgments = []
+    total_rows = len(df)
+    
+    # Usa un iteratore per il progresso
+    progress_bar = st.progress(0)
+    
+    for i, row in df.iterrows():
+        source_text = row['source']
+        input_ids = tokenizer.encode(source_text, return_tensors='pt')
         
-        for i, row in df_to_process.iterrows():
-            progress_container(f"Generazione giudizio per la riga {i+1}...", "info")
-            
-            # Costruisci il prompt per il modello
-            prompt = f"Materia: {row[materia_col]} - Descrizione Giudizio: {row[desc_col]}"
-            
-            # Tokenizza l'input
-            input_tokens = tokenizer(prompt, return_tensors="pt")
-            max_model_length = 512
-            
-            if input_tokens.input_ids.shape[1] > max_model_length:
-                # Usa la funzione di chunking per non perdere dati, passando il progress_container
-                generated_text = _process_text_in_chunks(model, tokenizer, prompt, progress_container)
-            else:
-                # Usa la generazione standard se l'input non è troppo lungo
-                outputs = model.generate(
-                    input_tokens.input_ids.to(model.device),
-                    max_length=max_model_length,
-                    num_beams=4,
-                    do_sample=True,
-                    top_p=0.9,
-                    repetition_penalty=1.2,
-                    early_stopping=True
-                )
-                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Aggiungi il giudizio generato al DataFrame
-            df.at[i, giudizio_col_name] = generated_text
-            
-            # Aggiungi un piccolo delay per non sovraccaricare il sistema
-            time.sleep(0.5)
+        # Genera il testo
+        with torch.no_grad():
+            output = model.generate(
+                input_ids,
+                max_length=512,
+                num_beams=4,
+                early_stopping=True
+            )
+        
+        generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+        generated_judgments.append(generated_text)
+        
+        # Aggiorna la barra di progresso
+        progress_bar.progress((i + 1) / total_rows)
+        progress_container(status_placeholder, f"Generazione giudizio {i+1} di {total_rows} completata.", "info")
 
-        progress_container(f"Generazione completata per il foglio '{sheet_name}'.", "success")
-        return df
-
-    except Exception as e:
-        progress_container(f"Errore nella generazione dei giudizi: {e}", "error")
-        progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return df
+    df['Giudizio'] = generated_judgments
+    progress_container(status_placeholder, "Generazione dei giudizi completata con successo!", "success")
+    
+    return df
