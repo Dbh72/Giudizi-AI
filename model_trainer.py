@@ -35,56 +35,47 @@ class LossLoggingCallback(TrainerCallback):
     """
     def on_step_end(self, args, state, control, **kwargs):
         if state.global_step % 100 == 0:
-            print(f"Step: {state.global_step}, Loss: {state.log_history[-1]['loss'] if 'loss' in state.log_history[-1] else 'N/A'}")
-            
-# ==============================================================================
-# SEZIONE 3: FUNZIONI PER LA PREPARAZIONE DEI DATI E L'ADDESTRAMENTO
-# ==============================================================================
+            loss = kwargs.get('loss')
+            if loss is not None:
+                print(f"Step {state.global_step}: Loss = {loss:.4f}")
 
-def preprocess_function(examples, tokenizer):
-    """
-    Funzione per tokenizzare gli input e i target per il fine-tuning.
-    """
-    # Combina la descrizione e il giudizio per il fine-tuning.
-    # Aggiungiamo un prefisso per indicare al modello che deve generare il giudizio.
-    inputs = [f"Descrizione: {desc}" for desc in examples["Descrizione"]]
-    targets = [f"{giudizio}" for giudizio in examples["Giudizio"]]
-    
-    # Tokenizzazione degli input
-    model_inputs = tokenizer(inputs, max_length=128, truncation=True, padding="max_length")
-    
-    # Tokenizzazione dei target (con gestione speciale)
-    labels = tokenizer(targets, max_length=128, truncation=True, padding="max_length")
-    
-    # Sostituiamo -100 con l'ID del pad token per calcolare correttamente la loss.
-    labels_with_ignore_index = []
-    for label in labels["input_ids"]:
-        labels_with_ignore_index.append([t if t != tokenizer.pad_token_id else -100 for t in label])
-
-    model_inputs["labels"] = labels_with_ignore_index
-    return model_inputs
+# ==============================================================================
+# SEZIONE 3: FUNZIONI PRINCIPALI
+# ==============================================================================
 
 def train_model(corpus_df, progress_container):
     """
-    Avvia il processo di fine-tuning del modello.
-    """
-    progress_container("Preparazione dei dati per l'addestramento...", "info")
+    Addestra il modello di linguaggio utilizzando il corpus fornito.
+
+    Args:
+        corpus_df (pd.DataFrame): Il DataFrame contenente i dati di addestramento.
+        progress_container (callable): Funzione per inviare messaggi di stato.
     
+    Returns:
+        tuple: Il modello e il tokenizer addestrati, o None, None in caso di errore.
+    """
     try:
-        # Seleziona solo le colonne necessarie
-        corpus_df = corpus_df[['Descrizione', 'Giudizio']]
-        
-        # Converte il DataFrame in un oggetto Dataset
+        if corpus_df.empty:
+            progress_container("Corpus di addestramento vuoto. Addestramento annullato.", "warning")
+            return None, None
+            
+        progress_container(f"Avvio del fine-tuning del modello '{MODEL_NAME}'...", "info")
+
+        # 1. Preparazione del Dataset
+        progress_container("Preparazione del dataset...", "info")
         dataset = Dataset.from_pandas(corpus_df)
+        dataset = dataset.train_test_split(test_size=0.1) # Split del 10% per test
         
-        # Divide il dataset in training e validation set (80/20)
-        split_dataset = dataset.train_test_split(test_size=0.2, seed=42)
+        progress_container("Dataset creato e diviso in set di addestramento e test.", "success")
         
-        # Carica il tokenizer e il modello pre-addestrato
+        # 2. Caricamento del Modello e del Tokenizer
+        progress_container("Caricamento del modello base e del tokenizer...", "info")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, torch_dtype=torch.float32)
 
-        # Configura l'adattatore LoRA (Low-Rank Adaptation)
+        progress_container("Modello e tokenizer caricati. Configurazione per PEFT...", "success")
+
+        # 3. Configurazione PEFT (Parameter-Efficient Fine-Tuning)
         peft_config = LoraConfig(
             task_type=TaskType.SEQ_2_SEQ_LM,
             inference_mode=False,
@@ -93,60 +84,72 @@ def train_model(corpus_df, progress_container):
             lora_dropout=0.1,
             target_modules=["q", "v"]
         )
-
+        
+        # 4. Ottenere il modello PEFT
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
+        progress_container("Modello configurato per il fine-tuning efficiente (PEFT).", "success")
+
+        # 5. Tokenizzazione dei dati
+        def preprocess_function(examples):
+            inputs = [ex for ex in examples["input_text"]]
+            targets = [ex for ex in examples["target_text"]]
+            model_inputs = tokenizer(inputs, max_length=512, truncation=True, padding="max_length")
+            labels = tokenizer(targets, max_length=512, truncation=True, padding="max_length")
+            model_inputs["labels"] = labels["input_ids"]
+            return model_inputs
+
+        tokenized_datasets = dataset.map(preprocess_function, batched=True, remove_columns=["input_text", "target_text"])
+
+        progress_container("Dati tokenizzati con successo.", "success")
         
-        # Tokenizza il dataset
-        tokenized_dataset = split_dataset.map(lambda x: preprocess_function(x, tokenizer), batched=True)
-        
-        # Configura gli argomenti di addestramento
+        # 6. Configurazione degli argomenti di addestramento
         training_args = TrainingArguments(
             output_dir=OUTPUT_DIR,
-            num_train_epochs=3,
+            evaluation_strategy="steps", # Strategia di valutazione basata sui passi
+            eval_steps=500, # Esegue la valutazione ogni 500 passi
+            save_strategy="steps", # Strategia di salvataggio basata sui passi
+            save_steps=500, # Salva un checkpoint ogni 500 passi
+            save_total_limit=3, # Limita il numero di checkpoint salvati
+            learning_rate=2e-5,
             per_device_train_batch_size=4,
             per_device_eval_batch_size=4,
-            warmup_steps=500,
             weight_decay=0.01,
-            logging_dir='./logs',
+            num_train_epochs=3,
+            logging_dir=f"{OUTPUT_DIR}/logs",
             logging_steps=100,
-            evaluation_strategy="epoch",
-            save_strategy="epoch",
-            load_best_model_at_end=True,
-            metric_for_best_model="eval_loss",
-            greater_is_better=False,
+            report_to="none" # Disabilita i report a servizi esterni
         )
-        
-        # Data Collator per il padding dinamico
+
+        # 7. Inizializzazione del Data Collator
         data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding=True)
-        
-        # Inizializza il Trainer
+
+        # 8. Creazione del Trainer
         trainer = Trainer(
             model=model,
             args=training_args,
-            train_dataset=tokenized_dataset["train"],
-            eval_dataset=tokenized_dataset["test"],
+            train_dataset=tokenized_datasets["train"],
+            eval_dataset=tokenized_datasets["test"],
             data_collator=data_collator,
             callbacks=[LossLoggingCallback()]
         )
+
+        progress_container("Trainer creato. Avvio dell'addestramento...", "info")
         
-        progress_container("Inizio del fine-tuning del modello. Questo potrebbe richiedere tempo...", "info")
-        
-        # Avvia l'addestramento
+        # 9. Avvio dell'addestramento
         trainer.train()
-        
-        progress_container("Fine-tuning completato. Salvataggio del modello...", "info")
-        
-        # Salva il modello fine-tuned
+
+        progress_container("Addestramento completato con successo. Salvataggio del modello finale...", "info")
+
+        # 10. Salvataggio del modello fine-tuned
         final_model_dir = os.path.join(OUTPUT_DIR, "final_model")
         os.makedirs(final_model_dir, exist_ok=True)
         trainer.save_model(final_model_dir)
-        tokenizer.save_pretrained(final_model_dir)
-        
-        progress_container(f"Modello fine-tuned salvato in: {final_model_dir}", "success")
-        
+
+        progress_container("Modello finale e tokenizer salvati.", "success")
+
         return model, tokenizer
-        
+
     except Exception as e:
         progress_container(f"Errore durante l'addestramento del modello: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
