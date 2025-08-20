@@ -207,8 +207,9 @@ def read_and_prepare_data_from_excel(file_object, sheet_names, progress_containe
     try:
         file_object.seek(0)
         
-        # Leggi solo i fogli selezionati per ottimizzare
-        all_dfs = pd.read_excel(file_object, sheet_name=sheet_names, header=None)
+        # Leggi solo i fogli selezionati per ottimizzare.
+        # Ho aggiunto l'argomento 'engine' per garantire la compatibilità con xlsx/xlsm.
+        all_dfs = pd.read_excel(file_object, sheet_name=sheet_names, header=None, engine='openpyxl')
         
         for sheet in sheet_names:
             df = all_dfs.get(sheet)
