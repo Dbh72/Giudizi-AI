@@ -105,8 +105,8 @@ with st.expander("Gestione del Corpus di Addestramento"):
     st.write("Puoi caricare uno o più file per costruire il corpus. Il corpus è il set di dati con cui il modello imparerà a generare i giudizi.")
     
     uploaded_corpus_file = st.file_uploader(
-        "Carica il file Excel per il corpus (.xlsx)", 
-        type=["xlsx"],
+        "Carica il file Excel per il corpus (.xlsx, .xls, .xlsm)", 
+        type=["xlsx", "xls", "xlsm"],
         key="corpus_uploader"
     )
 
@@ -188,7 +188,7 @@ st.header("2. Generazione dei Giudizi")
 if st.session_state.trained_model:
     uploaded_process_file = st.file_uploader(
         "Carica il file Excel da cui generare i giudizi", 
-        type=["xlsx"], 
+        type=["xlsx", "xls", "xlsm"], 
         key="process_uploader"
     )
 
@@ -263,4 +263,3 @@ if os.path.exists(log_path):
             file_name="Logs.txt",
             mime="text/plain"
         )
-

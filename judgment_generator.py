@@ -3,72 +3,90 @@
 # Modulo per la generazione dei giudizi utilizzando il modello fine-tunato.
 # ==============================================================================
 
+# SEZIONE 1: LIBRERIE NECESSARIE
+# ==============================================================================
+import pandas as pd
+from transformers import pipeline
 import streamlit as st
 import warnings
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import pandas as pd
-import torch
 
-# Ignoriamo i FutureWarning per mantenere la console pulita.
+# Ignora i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
 
-# Definiamo le costanti per il progetto
-OUTPUT_DIR = "./modello_finetunato"
-MODEL_NAME = "t5-small"
+# ==============================================================================
+# SEZIONE 2: FUNZIONI PRINCIPALI
+# ==============================================================================
 
-def progress_container_stub(*args, **kwargs):
-    """Funzione placeholder per evitare errori se non in ambiente Streamlit."""
-    pass
-
-def generate_judgments(df, model, tokenizer, status_placeholder):
+@st.cache_resource
+def load_model_for_inference(model, tokenizer):
     """
-    Genera i giudizi per un DataFrame dato utilizzando il modello fine-tunato.
+    Crea una pipeline di generazione di testo.
+    
+    Args:
+        model: Il modello fine-tunato.
+        tokenizer: Il tokenizer del modello.
+        
+    Returns:
+        pipeline: La pipeline per la generazione di testo.
+    """
+    return pipeline(
+        "text2text-generation",
+        model=model,
+        tokenizer=tokenizer
+    )
+
+def generate_judgments(df, trained_model, tokenizer, progress_container):
+    """
+    Genera i giudizi per ogni riga di un DataFrame.
     
     Args:
         df (pd.DataFrame): Il DataFrame da processare.
-        model: Il modello fine-tunato.
+        trained_model: Il modello fine-tunato.
         tokenizer: Il tokenizer del modello.
-        status_placeholder: Il placeholder di Streamlit per mostrare i progressi.
+        progress_container (function): Funzione per mostrare lo stato del processo.
         
     Returns:
-        pd.DataFrame: Il DataFrame con la colonna 'Giudizio' aggiunta.
+        pd.DataFrame: Il DataFrame con la nuova colonna 'Giudizio Generato'.
     """
-    progress_container = st.session_state.get('progress_container', progress_container_stub)
     
-    # Assicurati che le colonne 'source' e 'target' esistano
-    if 'source' not in df.columns or 'target' not in df.columns:
-        progress_container(status_placeholder, "Errore: Il file Excel deve contenere le colonne 'source' e 'target'.", "error")
-        return None
-
-    progress_container(status_placeholder, "Inizio della generazione dei giudizi...", "info")
+    # Carica il modello in una pipeline per l'inferenza
+    generator = load_model_for_inference(trained_model, tokenizer)
     
-    generated_judgments = []
-    total_rows = len(df)
+    # Rimuove le righe con valori mancanti
+    df_clean = df.dropna(subset=['Compito Svolto'])
     
-    # Usa un iteratore per il progresso
+    # Prepara il testo di input per il modello
+    inputs = [f"Scrivi un giudizio per il seguente compito: {text}" for text in df_clean['Compito Svolto']]
+    
+    # Genera i giudizi con un indicatore di progresso
+    judgments = []
+    
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    for i, row in df.iterrows():
-        source_text = row['source']
-        input_ids = tokenizer.encode(source_text, return_tensors='pt')
+    total_rows = len(inputs)
+    
+    for i, input_text in enumerate(inputs):
+        # Esegui la generazione del testo
+        try:
+            generated_text = generator(input_text, max_length=128, num_beams=5, early_stopping=True)
+            judgment = generated_text[0]['generated_text']
+        except Exception as e:
+            judgment = f"Errore nella generazione: {e}"
         
-        # Genera il testo
-        with torch.no_grad():
-            output = model.generate(
-                input_ids,
-                max_length=512,
-                num_beams=4,
-                early_stopping=True
-            )
-        
-        generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-        generated_judgments.append(generated_text)
+        judgments.append(judgment)
         
         # Aggiorna la barra di progresso
-        progress_bar.progress((i + 1) / total_rows)
-        progress_container(status_placeholder, f"Generazione giudizio {i+1} di {total_rows} completata.", "info")
-
-    df['Giudizio'] = generated_judgments
-    progress_container(status_placeholder, "Generazione dei giudizi completata con successo!", "success")
+        progress = (i + 1) / total_rows
+        progress_bar.progress(progress)
+        status_text.text(f"Progresso: {i+1}/{total_rows}")
+        
+    # Aggiunge i giudizi generati al DataFrame
+    df_clean.loc[:, 'Giudizio Generato'] = judgments
     
-    return df
+    progress_bar.empty()
+    status_text.empty()
+    
+    progress_container(st.empty(), "Generazione dei giudizi completata.", "success")
+    
+    return df_clean

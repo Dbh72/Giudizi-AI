@@ -1,74 +1,92 @@
 # ==============================================================================
-# File: judgment_generator.py
-# Modulo per la generazione dei giudizi utilizzando il modello fine-tunato.
+# File: excel_reader.py
+# Modulo per la lettura e l'elaborazione dei file Excel.
 # ==============================================================================
 
-import streamlit as st
-import warnings
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import pandas as pd
-import torch
+from io import BytesIO
+import streamlit as st
 
-# Ignoriamo i FutureWarning per mantenere la console pulita.
-warnings.filterwarnings("ignore")
-
-# Definiamo le costanti per il progetto
-OUTPUT_DIR = "./modello_finetunato"
-MODEL_NAME = "t5-small"
-
-def progress_container_stub(*args, **kwargs):
-    """Funzione placeholder per evitare errori se non in ambiente Streamlit."""
-    pass
-
-def generate_judgments(df, model, tokenizer, status_placeholder):
+def load_excel_with_sheets(uploaded_file):
     """
-    Genera i giudizi per un DataFrame dato utilizzando il modello fine-tunato.
+    Carica un file Excel e restituisce un dizionario di DataFrame,
+    uno per ogni foglio di lavoro.
     
     Args:
-        df (pd.DataFrame): Il DataFrame da processare.
-        model: Il modello fine-tunato.
-        tokenizer: Il tokenizer del modello.
-        status_placeholder: Il placeholder di Streamlit per mostrare i progressi.
+        uploaded_file (UploadedFile): Il file caricato tramite Streamlit.
         
     Returns:
-        pd.DataFrame: Il DataFrame con la colonna 'Giudizio' aggiunta.
+        dict: Un dizionario dove le chiavi sono i nomi dei fogli e i valori sono i DataFrame.
     """
-    progress_container = st.session_state.get('progress_container', progress_container_stub)
+    # Usiamo BytesIO per leggere il file in memoria
+    file_bytes = BytesIO(uploaded_file.getvalue())
     
-    # Assicurati che le colonne 'source' e 'target' esistano
-    if 'source' not in df.columns or 'target' not in df.columns:
-        progress_container(status_placeholder, "Errore: Il file Excel deve contenere le colonne 'source' e 'target'.", "error")
-        return None
+    # Pandas può leggere automaticamente tutti i fogli di lavoro
+    all_sheets = pd.read_excel(file_bytes, sheet_name=None, engine='openpyxl')
+    
+    return all_sheets
 
-    progress_container(status_placeholder, "Inizio della generazione dei giudizi...", "info")
+def read_excel_to_df(uploaded_file, progress_container):
+    """
+    Legge un file Excel caricato e permette all'utente di selezionare
+    un foglio di lavoro.
     
-    generated_judgments = []
-    total_rows = len(df)
-    
-    # Usa un iteratore per il progresso
-    progress_bar = st.progress(0)
-    
-    for i, row in df.iterrows():
-        source_text = row['source']
-        input_ids = tokenizer.encode(source_text, return_tensors='pt')
+    Args:
+        uploaded_file (UploadedFile): Il file caricato tramite Streamlit.
+        progress_container (function): Funzione per mostrare lo stato del processo.
         
-        # Genera il testo
-        with torch.no_grad():
-            output = model.generate(
-                input_ids,
-                max_length=512,
-                num_beams=4,
-                early_stopping=True
-            )
+    Returns:
+        tuple: Un tuple contenente il DataFrame del foglio selezionato e il nome del foglio.
+    """
+    try:
+        progress_container(st.empty(), "Lettura dei fogli di lavoro...", "info")
         
-        generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-        generated_judgments.append(generated_text)
+        # Carica il file e tutti i suoi fogli
+        all_sheets = load_excel_with_sheets(uploaded_file)
         
-        # Aggiorna la barra di progresso
-        progress_bar.progress((i + 1) / total_rows)
-        progress_container(status_placeholder, f"Generazione giudizio {i+1} di {total_rows} completata.", "info")
-
-    df['Giudizio'] = generated_judgments
-    progress_container(status_placeholder, "Generazione dei giudizi completata con successo!", "success")
+        progress_container(st.empty(), "Fogli di lavoro trovati. Seleziona un foglio per continuare.", "success")
+        
+        # L'utente seleziona il foglio
+        sheet_name = st.selectbox(
+            "Seleziona il foglio di lavoro da processare:",
+            list(all_sheets.keys())
+        )
+        
+        df = all_sheets[sheet_name]
+        
+        # Verifica se il DataFrame è vuoto
+        if df.empty:
+            raise ValueError("Il foglio di lavoro selezionato è vuoto.")
+            
+        progress_container(st.empty(), f"Foglio '{sheet_name}' caricato con successo.", "success")
+        
+        return df, sheet_name
+        
+    except Exception as e:
+        progress_container(st.empty(), f"Errore durante la lettura del file Excel: {e}", "error")
+        st.error(f"Errore: {e}")
+        st.stop() # Interrompe l'esecuzione in caso di errore
+        
+def convert_to_corpus_format(df):
+    """
+    Converte un DataFrame nel formato richiesto per il corpus.
     
-    return df
+    Args:
+        df (pd.DataFrame): Il DataFrame originale.
+        
+    Returns:
+        pd.DataFrame: Il DataFrame convertito.
+    """
+    # Rinomina le colonne
+    df_corpus = df.rename(columns={
+        "Compito Svolto": "input_text", 
+        "Giudizio": "target_text"
+    })
+    
+    # Rimuovi le righe con valori mancanti
+    df_corpus = df_corpus.dropna(subset=['input_text', 'target_text'])
+    
+    # Aggiungi un prefisso a 'input_text' per l'addestramento
+    df_corpus['input_text'] = "Scrivi un giudizio per il seguente compito: " + df_corpus['input_text']
+    
+    return df_corpus
