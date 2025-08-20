@@ -134,8 +134,7 @@ def read_and_prepare_data_from_excel(file_object, sheet_names, progress_containe
     """
     try:
         corpus_list = []
-        # FILTRO CORRETTO: la logica per ignorare i fogli è ora qui,
-        # senza dipendere da parametri esterni.
+        # Correzione: La lista dei fogli da ignorare viene definita qui.
         sheets_to_ignore = ['prototipo', 'medie']
         
         for sheet in sheet_names:
@@ -231,6 +230,5 @@ def get_excel_sheet_names(file_object):
         workbook.close()
         return sheet_names
     except Exception as e:
-        st.error(f"Errore nel leggere i nomi dei fogli: {e}")
-        st.error(f"Traceback: {traceback.format_exc()}")
-        return []
+        # Usare st.error qui potrebbe causare problemi, è meglio gestirlo nel file chiamante
+        raise e
