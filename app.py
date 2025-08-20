@@ -73,12 +73,16 @@ def reset_project_state():
 
     # Resetta le session_state
     for key in list(st.session_state.keys()):
-        if key not in ['corpus_df', 'model_ready', 'process_completed_file']:
+        # Mantieni solo le chiavi essenziali per l'inizializzazione, se necessario
+        if key not in ['corpus_df', 'model_ready', 'process_completed_file', 'uploaded_training_file', 'uploaded_process_file']:
             del st.session_state[key]
     
+    # Reimposta esplicitamente le variabili principali
     st.session_state.corpus_df = pd.DataFrame()
     st.session_state.model_ready = False
     st.session_state.process_completed_file = None
+    st.session_state.uploaded_training_file = None
+    st.session_state.uploaded_process_file = None
     
 # ==============================================================================
 # SEZIONE 2: INTERFACCIA UTENTE E LOGICA APPLICATIVA
@@ -91,7 +95,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Inizializzazione della session_state
+# Inizializzazione della session_state per tutte le variabili necessarie
 if 'corpus_df' not in st.session_state:
     st.session_state.corpus_df = pd.DataFrame()
 if 'model_ready' not in st.session_state:
@@ -100,8 +104,10 @@ if 'process_completed_file' not in st.session_state:
     st.session_state.process_completed_file = None
 if 'selected_sheet' not in st.session_state:
     st.session_state.selected_sheet = None
-if 'process_file' not in st.session_state:
-    st.session_state.process_file = None
+if 'uploaded_training_file' not in st.session_state:
+    st.session_state.uploaded_training_file = None
+if 'uploaded_process_file' not in st.session_state:
+    st.session_state.uploaded_process_file = None
 
 st.title("🤖 Giudizi AI")
 st.markdown("---")
@@ -115,7 +121,8 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     # Creazione del selettore di file per i file di addestramento
-    uploaded_training_file = st.file_uploader(
+    # Salviamo il file caricato nella session_state per non perderlo
+    st.session_state.uploaded_training_file = st.file_uploader(
         "Carica file di addestramento",
         type=['xlsx', 'xls', 'xlsm'],
         key="training_uploader"
@@ -124,12 +131,12 @@ with col1:
 with col2:
     # Creazione del pulsante per caricare e aggiornare il corpus
     if st.button("Carica e Aggiorna Corpus"):
-        if uploaded_training_file is not None:
+        if st.session_state.uploaded_training_file is not None:
             status_placeholder_corpus = st.empty()
             progress_container(status_placeholder_corpus, "Avvio del caricamento e aggiornamento del corpus...", "info")
             try:
                 with st.spinner("Elaborazione del file..."):
-                    df_from_excel = er.read_and_prepare_data_from_excel(uploaded_training_file, progress_container=lambda ph, msg, type: progress_container(status_placeholder_corpus, msg, type))
+                    df_from_excel = er.read_and_prepare_data_from_excel(st.session_state.uploaded_training_file, progress_container=lambda ph, msg, type: progress_container(status_placeholder_corpus, msg, type))
                 
                 st.session_state.corpus_df = cb.build_or_update_corpus(df_from_excel, lambda ph, msg, type: progress_container(status_placeholder_corpus, msg, type))
                 progress_container(status_placeholder_corpus, "Corpus aggiornato con successo!", "success")
@@ -164,26 +171,26 @@ st.header("2. Generazione dei Giudizi")
 if st.session_state.model_ready:
     st.write("Ora puoi caricare un file senza giudizi e usare il modello addestrato per generarli.")
     # Creazione del selettore di file per i file da processare
-    uploaded_process_file = st.file_uploader(
+    # Salviamo il file caricato nella session_state per non perderlo
+    st.session_state.uploaded_process_file = st.file_uploader(
         "Carica file da processare",
         type=['xlsx', 'xls', 'xlsm'],
         key="processing_uploader"
     )
 
-    if uploaded_process_file:
-        st.session_state.process_file = uploaded_process_file
-        sheet_names = er.get_excel_sheet_names(uploaded_process_file)
+    if st.session_state.uploaded_process_file:
+        sheet_names = er.get_excel_sheet_names(st.session_state.uploaded_process_file)
         if sheet_names:
             # Creazione del selettore per i fogli di lavoro
             st.session_state.selected_sheet = st.selectbox("Seleziona il foglio da processare:", sheet_names, key="sheet_selector")
         
         # Creazione del pulsante per avviare la generazione dei giudizi
         if st.button("Genera Giudizi"):
-            if st.session_state.process_file is not None and st.session_state.selected_sheet is not None:
+            if st.session_state.uploaded_process_file is not None and st.session_state.selected_sheet is not None:
                 status_placeholder_generate = st.empty()
                 progress_container(status_placeholder_generate, "Avvio della generazione dei giudizi...", "info")
                 try:
-                    df_to_process = er.read_and_prepare_data_from_excel(st.session_state.process_file, sheets_to_read=[st.session_state.selected_sheet], progress_container=lambda ph, msg, type: progress_container(status_placeholder_generate, msg, type))
+                    df_to_process = er.read_and_prepare_data_from_excel(st.session_state.uploaded_process_file, sheets_to_read=[st.session_state.selected_sheet], progress_container=lambda ph, msg, type: progress_container(status_placeholder_generate, msg, type))
                     if not df_to_process.empty:
                         with st.spinner("Generazione dei giudizi in corso..."):
                             st.session_state.process_completed_file = jg.generate_judgments(df_to_process, st.session_state.selected_sheet, lambda ph, msg, type: progress_container(status_placeholder_generate, msg, type))
