@@ -18,6 +18,7 @@ from config import CORPUS_FILE
 def build_or_update_corpus(new_df, progress_container):
     """
     Costruisce o aggiorna il corpus di addestramento con un nuovo DataFrame.
+    Implementa l'addestramento incrementale.
     """
     try:
         corpus_df = pd.DataFrame()
@@ -33,31 +34,21 @@ def build_or_update_corpus(new_df, progress_container):
         if not new_df.empty:
             progress_container(f"Trovate {len(new_df)} nuove righe da aggiungere.", "info")
             
-            # Filtra il nuovo DataFrame per rimuovere righe con valori mancanti in 'Descrizione' o 'Giudizio'
-            new_df_cleaned = new_df.dropna(subset=['Descrizione', 'Giudizio'])
+            # Concatena il corpus esistente con il nuovo DataFrame
+            # Usa ignore_index=True per creare un nuovo indice pulito
+            updated_corpus = pd.concat([corpus_df, new_df], ignore_index=True)
             
-            if new_df_cleaned.empty:
-                progress_container("Attenzione: Nessun dato valido (con 'Descrizione' e 'Giudizio') nel nuovo file. Il corpus non è stato aggiornato.", "warning")
-                return corpus_df
+            # Rimuovi i duplicati basati su tutte le colonne per evitare dati ridondanti
+            updated_corpus.drop_duplicates(inplace=True)
             
-            progress_container(f"Trovate {len(new_df_cleaned)} righe valide da aggiungere.", "info")
-            
-            # Concatena il vecchio corpus con il nuovo
-            updated_corpus = pd.concat([corpus_df, new_df_cleaned], ignore_index=True)
-            
-            # Rimuovi i duplicati
-            updated_corpus.drop_duplicates(subset=['Descrizione', 'Giudizio'], keep='first', inplace=True)
-            
-            progress_container(f"Corpus aggiornato. Righe totali: {len(updated_corpus)}", "success")
-            
-            # Salva il corpus aggiornato
+            # Salva il corpus aggiornato in un formato efficiente
             updated_corpus.to_parquet(CORPUS_FILE, index=False)
+            progress_container(f"Corpus di addestramento aggiornato e salvato. Righe totali: {len(updated_corpus)}", "success")
             
             return updated_corpus
         else:
             progress_container("Nessun dato valido nel nuovo file. Il corpus non è stato aggiornato.", "warning")
-
-        return corpus_df
+            return corpus_df
 
     except Exception as e:
         progress_container(f"Errore durante l'aggiornamento del corpus: {e}", "error")
@@ -91,3 +82,4 @@ def load_corpus(progress_container):
         progress_container(f"Errore nel caricamento del corpus: {e}", "error")
         progress_container(f"Traceback: {traceback.format_exc()}", "error")
         return pd.DataFrame()
+

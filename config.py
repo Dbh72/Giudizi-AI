@@ -9,3 +9,4 @@ OUTPUT_DIR = "modello_finetunato"
 MODEL_NAME = "google/flan-t5-base"
 # Il nome del file del corpus di addestramento.
 CORPUS_FILE = "training_corpus.parquet"
+

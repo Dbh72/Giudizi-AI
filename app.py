@@ -20,11 +20,10 @@ import warnings
 import traceback
 from datetime import datetime
 from io import BytesIO
-import json
 import time
 
 # Importa i moduli personalizzati
-import excel_reader_v2 as er # IMPORTAZIONE CORRETTA
+import excel_reader as er
 import model_trainer as mt
 import judgment_generator as jg
 import corpus_builder as cb
@@ -71,9 +70,8 @@ def reset_project_state():
     if os.path.exists(CORPUS_FILE):
         os.remove(CORPUS_FILE)
 
-    # Resetta le session_state
+    # Resetta le session_state, mantenendo solo le variabili essenziali
     for key in list(st.session_state.keys()):
-        # Mantieni solo le chiavi essenziali per l'inizializzazione, se necessario
         if key not in ['corpus_df', 'model_ready', 'process_completed_file', 'uploaded_training_file', 'uploaded_process_file']:
             del st.session_state[key]
     
@@ -153,7 +151,7 @@ with col3:
         if not st.session_state.corpus_df.empty:
             status_placeholder_train = st.empty()
             with st.spinner("Addestramento del modello in corso... Potrebbe richiedere diversi minuti."):
-                model, tokenizer = mt.train_model(st.session_state.corpus_df, lambda ph, msg, type: progress_container(status_placeholder_train, msg, type))
+                model, tokenizer = mt.train_model(st.session_state.corpus_df, progress_container=lambda ph, msg, type: progress_container(status_placeholder_train, msg, type))
             if model and tokenizer:
                 st.session_state.model_ready = True
                 progress_container(status_placeholder_train, "Addestramento completato. Il modello è pronto per generare giudizi.", "success")
@@ -214,7 +212,7 @@ st.header("3. Stato e Download")
 if st.session_state.process_completed_file is not None:
     st.write("### Scarica il file completato")
     
-    # Creazione del pulsante di download per il file Excel
+    # Creazione di un buffer in memoria per il file Excel
     output_buffer = BytesIO()
     with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
         st.session_state.process_completed_file.to_excel(writer, index=False, sheet_name=st.session_state.selected_sheet)
@@ -249,3 +247,4 @@ with col_status:
         st.info(f"Corpus di addestramento: {len(st.session_state.corpus_df)} righe")
     else:
         st.info("Corpus di addestramento: vuoto")
+
