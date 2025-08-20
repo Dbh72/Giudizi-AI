@@ -24,14 +24,132 @@ import json
 import time
 import requests
 import re
-import random # Aggiunto per le funzioni mock
+import random 
+import openpyxl
+from collections import Counter
+from openpyxl import Workbook, load_workbook
 
-# Importa i moduli personalizzati
-# Nota: Questi moduli sono stati inclusi qui come "mock" per garantire
-# che l'app si avvii e funzioni senza errori di importazione, anche se
-# i file originali non sono disponibili.
-# Per far funzionare l'app con le tue logiche, dovrai sostituire
-# queste classi mock con i tuoi import originali.
+# ==============================================================================
+# SEZIONE A: FUNZIONI PER LA GESTIONE DEI DATI EXCEL
+# (dal tuo file excel_reader.py)
+# ==============================================================================
+class ExcelReader:
+    """
+    Classe per leggere e preparare dati da file Excel.
+    """
+    def find_header_row_and_columns(self, df):
+        """
+        Trova la riga di intestazione e le posizioni delle colonne 'input_text' e 'target_text'.
+        """
+        try:
+            for i in range(min(50, len(df))):
+                row = df.iloc[i]
+                row_str = " ".join(row.astype(str).tolist()).lower()
+                # Use a regular expression to match "descrizione" or "description"
+                if re.search(r'\b(descrizione|description)\b', row_str) and re.search(r'\b(giudizio|judgment)\b', row_str):
+                    header_row_index = i
+                    headers = df.iloc[header_row_index].astype(str).tolist()
+                    description_col_name = next((h for h in headers if re.search(r'\b(descrizione|description)\b', h.lower())), None)
+                    judgment_col_name = next((h for h in headers if re.search(r'\b(giudizio|judgment)\b', h.lower())), None)
+                    
+                    if description_col_name and judgment_col_name:
+                        return header_row_index, description_col_name, judgment_col_name
+            return None, None, None
+        except Exception as e:
+            raise Exception(f"Errore nella ricerca dell'intestazione: {e}")
+
+    def read_and_prepare_data_from_excel(self, file_object, sheet_names, progress_container):
+        """
+        Legge i dati dai fogli specificati, prepara un dataframe con 'input_text' e 'target_text'.
+        """
+        try:
+            corpus_list = []
+            
+            for sheet in sheet_names:
+                progress_container(f"Lettura del foglio: '{sheet}'...", "info")
+                file_object.seek(0)
+                try:
+                    df = pd.read_excel(file_object, sheet_name=sheet, header=None)
+                except Exception as e:
+                    progress_container(f"Impossibile leggere il foglio '{sheet}'. Ignorato. Errore: {e}", "warning")
+                    continue
+                
+                header_row_index, description_col, judgment_col = self.find_header_row_and_columns(df)
+                
+                if header_row_index is None:
+                    progress_container(f"Attenzione: Intestazione non trovata nel foglio '{sheet}'. Saltato.", "warning")
+                    continue
+                
+                df.columns = df.iloc[header_row_index]
+                df = df.iloc[header_row_index + 1:].reset_index(drop=True)
+                
+                if description_col not in df.columns or judgment_col not in df.columns:
+                    progress_container(f"Attenzione: Colonne 'Descrizione' o 'Giudizio' non trovate nel foglio '{sheet}'. Saltato.", "warning")
+                    continue
+                
+                df_subset = df[[description_col, judgment_col]].rename(columns={description_col: 'input_text', judgment_col: 'target_text'})
+                
+                data_for_dataset = []
+                for _, row in df_subset.iterrows():
+                    input_text = str(row['input_text']).strip()
+                    target_text = str(row['target_text']).strip()
+                    
+                    if pd.notna(input_text) and pd.notna(target_text) and input_text and target_text != "nan":
+                        data_for_dataset.append({
+                            'input_text': input_text,
+                            'target_text': target_text
+                        })
+
+                if not data_for_dataset:
+                    progress_container(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet}'. Saltato.", "warning")
+                    continue
+                
+                corpus_list.extend(data_for_dataset)
+            
+            if not corpus_list:
+                progress_container("Nessun dato valido trovato in tutti i fogli del file.", "error")
+                return pd.DataFrame()
+            
+            return pd.DataFrame(corpus_list)
+
+        except Exception as e:
+            progress_container(f"Errore nella lettura del file: {e}", "error")
+            progress_container(f"Traceback: {traceback.format_exc()}", "error")
+            return pd.DataFrame()
+
+    def get_excel_sheet_names(self, file_object):
+        """
+        Restituisce una lista con i nomi di tutti i fogli di lavoro in un file Excel.
+        """
+        try:
+            file_object.seek(0)
+            workbook = openpyxl.load_workbook(file_object, read_only=True)
+            sheet_names = workbook.sheetnames
+            workbook.close()
+            return sheet_names
+        except Exception as e:
+            progress_container(f"Errore nella lettura dei nomi dei fogli: {e}", "error")
+            return []
+
+    def get_file_type(self, file_object):
+        """
+        Determina il tipo di file Excel in base al contenuto.
+        """
+        file_object.seek(0)
+        signature = file_object.read(8)
+        file_object.seek(0)
+        
+        if signature == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
+            return 'xls'
+        elif signature[:4] == b'PK\x03\x04':
+            return 'xlsx'
+        else:
+            return None
+
+# ==============================================================================
+# SEZIONE B: FUNZIONI PER L'ADDESTRAMENTO E LA GENERAZIONE
+# (mock)
+# ==============================================================================
 
 class MockModel:
     def __init__(self):
@@ -41,23 +159,12 @@ class MockTokenizer:
     def __init__(self):
         pass
 
-class MockExcelReader:
-    def read_and_prepare_data_from_excel(self, file_object, sheet_names, progress_container):
-        progress_container("MOCK: Lettura e preparazione dati da Excel...", "info")
-        # Simula un DataFrame con alcune righe di dati
-        data = {'input_text': [f"Input {i}" for i in range(20)],
-                'target_text': [f"Giudizio {i}" for i in range(20)]}
-        return pd.DataFrame(data)
-
-    def get_excel_sheet_names(self, file_object):
-        progress_container("MOCK: Lettura dei nomi dei fogli...", "info")
-        # Simula alcuni nomi di fogli
-        return ['FogliodiLavoro1', 'FogliodiLavoro2', 'Dati_Corpus', 'Prototipo', 'Medie']
-
 class MockModelTrainer:
     def train_model(self, corpus_df, progress_container):
         progress_container("MOCK: Addestramento del modello in corso...", "info")
-        time.sleep(2) # Simula un'operazione che richiede tempo
+        for i in range(1, 6):
+            time.sleep(1)
+            progress_container(f"MOCK: Addestramento - Fase {i}/5...", "info")
         progress_container("MOCK: Addestramento completato.", "success")
         return MockModel(), MockTokenizer()
 
@@ -98,8 +205,8 @@ class MockCorpusBuilder:
         time.sleep(1)
         progress_container("MOCK: Corpus eliminato.", "success")
         
-# Istanzio le classi mock
-er = MockExcelReader()
+# Istanzio le classi
+er = ExcelReader()
 mt = MockModelTrainer()
 jg = MockJudgmentGenerator()
 cb = MockCorpusBuilder()
@@ -258,7 +365,6 @@ with main_col:
     if uploaded_files_trainer:
         st.session_state.uploaded_files = uploaded_files_trainer
         try:
-            # Mostra i fogli di lavoro e permette di selezionarne uno
             first_file = uploaded_files_trainer[0]
             sheet_names = er.get_excel_sheet_names(first_file)
             st.session_state.selected_sheet_trainer = st.selectbox(
@@ -273,11 +379,9 @@ with main_col:
     if st.button("Avvia Addestramento"):
         if st.session_state.uploaded_files:
             try:
-                # Legge e prepara il nuovo dataframe
                 progress_container("Lettura dei file e preparazione del corpus...", "info")
                 new_df = pd.DataFrame()
                 for file in st.session_state.uploaded_files:
-                    # Ho aggiunto un controllo per il foglio selezionato
                     if st.session_state.selected_sheet_trainer:
                         df_temp = er.read_and_prepare_data_from_excel(file, [st.session_state.selected_sheet_trainer], lambda msg, type: progress_container(msg, type))
                         new_df = pd.concat([new_df, df_temp], ignore_index=True)
@@ -285,10 +389,8 @@ with main_col:
                         progress_container("Seleziona un foglio di lavoro.", "warning")
                         continue
 
-                # Aggiorna il corpus esistente
                 st.session_state.corpus_df = cb.build_or_update_corpus(new_df, lambda msg, type: progress_container(msg, type))
                 
-                # Avvia il fine-tuning se il corpus non è vuoto
                 if not st.session_state.corpus_df.empty:
                     st.session_state.model, st.session_state.tokenizer = mt.train_model(st.session_state.corpus_df, lambda msg, type: progress_container(msg, type))
                     if st.session_state.model and st.session_state.tokenizer:
@@ -322,11 +424,9 @@ with main_col:
         key="uploader_process"
     )
     
-    # Aggiunto blocco per la selezione del foglio di lavoro per la generazione
     if uploaded_process_file:
         st.session_state.uploaded_process_file = uploaded_process_file
         try:
-            # Mostra i fogli di lavoro e permette di selezionarne uno
             sheet_names = er.get_excel_sheet_names(uploaded_process_file)
             st.session_state.selected_sheet_process = st.selectbox(
                 "Seleziona il foglio di lavoro da completare:",
@@ -346,7 +446,6 @@ with main_col:
                     
                     if not df.empty:
                         progress_container("Generazione dei giudizi in corso...", "info")
-                        # Usa il modello e il tokenizer dalla sessione
                         df_with_judgments = jg.generate_judgments(df, st.session_state.model, st.session_state.tokenizer, st.session_state.selected_sheet_process, lambda msg, type: progress_container(msg, type))
                         
                         st.session_state.process_completed_file = df_with_judgments
@@ -376,7 +475,6 @@ with main_col:
         
         st.dataframe(st.session_state.process_completed_file)
         
-        # Creiamo un buffer in memoria per il file Excel
         output_buffer = BytesIO()
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
             st.session_state.process_completed_file.to_excel(writer, index=False, sheet_name=st.session_state.selected_sheet)
