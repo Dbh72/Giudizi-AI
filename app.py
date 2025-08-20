@@ -23,6 +23,9 @@ from io import BytesIO
 import json
 import time
 
+# Imposta il layout della pagina per utilizzare l'intera larghezza dello schermo
+st.set_page_config(layout="wide")
+
 # Importa i moduli personalizzati
 import excel_reader as er
 import model_trainer as mt
