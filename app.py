@@ -84,6 +84,7 @@ def reset_project_state():
 # SEZIONE 2: INTERFACCIA UTENTE E LOGICA APPLICATIVA
 # ==============================================================================
 
+# Configurazione della pagina e titoli principali
 st.set_page_config(
     page_title="Giudizi AI",
     page_icon="🤖",
@@ -109,10 +110,11 @@ st.markdown("---")
 st.header("1. Addestramento del Modello")
 st.write("Carica qui i file di valutazione che contengono i giudizi che il modello deve imparare. Se il corpus esiste già, i nuovi dati verranno aggiunti.")
 
+# Creazione delle colonne per organizzare gli elementi
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    # Il caricamento del file avviene automaticamente una volta selezionato.
+    # Creazione del selettore di file per i file di addestramento
     uploaded_training_file = st.file_uploader(
         "Carica file di addestramento",
         type=['xlsx', 'xls', 'xlsm'],
@@ -120,6 +122,7 @@ with col1:
     )
 
 with col2:
+    # Creazione del pulsante per caricare e aggiornare il corpus
     if st.button("Carica e Aggiorna Corpus"):
         if uploaded_training_file is not None:
             status_placeholder_corpus = st.empty()
@@ -138,6 +141,7 @@ with col2:
             st.warning("Per favore, carica un file prima di aggiornare il corpus.")
 
 with col3:
+    # Creazione del pulsante per avviare l'addestramento del modello
     if st.button("Addestra/Aggiorna Modello"):
         if not st.session_state.corpus_df.empty:
             status_placeholder_train = st.empty()
@@ -159,6 +163,7 @@ st.header("2. Generazione dei Giudizi")
 
 if st.session_state.model_ready:
     st.write("Ora puoi caricare un file senza giudizi e usare il modello addestrato per generarli.")
+    # Creazione del selettore di file per i file da processare
     uploaded_process_file = st.file_uploader(
         "Carica file da processare",
         type=['xlsx', 'xls', 'xlsm'],
@@ -169,8 +174,10 @@ if st.session_state.model_ready:
         st.session_state.process_file = uploaded_process_file
         sheet_names = er.get_excel_sheet_names(uploaded_process_file)
         if sheet_names:
+            # Creazione del selettore per i fogli di lavoro
             st.session_state.selected_sheet = st.selectbox("Seleziona il foglio da processare:", sheet_names, key="sheet_selector")
         
+        # Creazione del pulsante per avviare la generazione dei giudizi
         if st.button("Genera Giudizi"):
             if st.session_state.process_file is not None and st.session_state.selected_sheet is not None:
                 status_placeholder_generate = st.empty()
@@ -200,7 +207,7 @@ st.header("3. Stato e Download")
 if st.session_state.process_completed_file is not None:
     st.write("### Scarica il file completato")
     
-    # Creiamo un buffer in memoria per il file Excel
+    # Creazione del pulsante di download per il file Excel
     output_buffer = BytesIO()
     with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
         st.session_state.process_completed_file.to_excel(writer, index=False, sheet_name=st.session_state.selected_sheet)
@@ -214,15 +221,18 @@ if st.session_state.process_completed_file is not None:
     )
 
 st.write("### Gestione Progetto")
+# Creazione di colonne per il pulsante di reset e lo stato
 col_reset, col_status = st.columns([1, 2])
 
 with col_reset:
+    # Creazione del pulsante per resettare il progetto
     if st.button("Resetta tutto il progetto"):
         reset_project_state()
         st.session_state.model_ready = False
         st.rerun()
 
 with col_status:
+    # Mostra i messaggi di stato del progetto
     if st.session_state.model_ready:
         st.success("Modello pronto per la generazione di giudizi!")
     else:
