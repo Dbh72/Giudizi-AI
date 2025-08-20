@@ -112,6 +112,7 @@ st.write("Carica qui i file di valutazione che contengono i giudizi che il model
 col1, col2, col3 = st.columns(3)
 
 with col1:
+    # Il caricamento del file avviene automaticamente una volta selezionato.
     uploaded_training_file = st.file_uploader(
         "Carica file di addestramento",
         type=['xlsx', 'xls', 'xlsm'],
