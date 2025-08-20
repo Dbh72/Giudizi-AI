@@ -139,11 +139,12 @@ with col2:
                 with st.spinner("Elaborazione del file..."):
                     df_from_excel = er.read_and_prepare_data_from_excel(
                         st.session_state.uploaded_training_file, 
-                        sheets_to_read=all_sheets, # Passa l'argomento richiesto
-                        progress_container=lambda ph, msg, type: progress_container(status_placeholder_corpus, msg, type)
+                        sheets_to_read=all_sheets,
+                        # Passiamo una lambda che si adatta ai diversi modi in cui viene chiamata la funzione
+                        progress_container=lambda *args, **kwargs: progress_container(status_placeholder_corpus, *args, **kwargs)
                     )
                 
-                st.session_state.corpus_df = cb.build_or_update_corpus(df_from_excel, lambda ph, msg, type: progress_container(status_placeholder_corpus, msg, type))
+                st.session_state.corpus_df = cb.build_or_update_corpus(df_from_excel, progress_container=lambda *args, **kwargs: progress_container(status_placeholder_corpus, *args, **kwargs))
                 progress_container(status_placeholder_corpus, "Corpus aggiornato con successo!", "success")
                 st.session_state.model_ready = False
                 
@@ -158,7 +159,7 @@ with col3:
         if not st.session_state.corpus_df.empty:
             status_placeholder_train = st.empty()
             with st.spinner("Addestramento del modello in corso... Potrebbe richiedere diversi minuti."):
-                model, tokenizer = mt.train_model(st.session_state.corpus_df, progress_container=lambda ph, msg, type: progress_container(status_placeholder_train, msg, type))
+                model, tokenizer = mt.train_model(st.session_state.corpus_df, progress_container=lambda *args, **kwargs: progress_container(status_placeholder_train, *args, **kwargs))
             if model and tokenizer:
                 st.session_state.model_ready = True
                 progress_container(status_placeholder_train, "Addestramento completato. Il modello è pronto per generare giudizi.", "success")
@@ -195,10 +196,10 @@ if st.session_state.model_ready:
                 status_placeholder_generate = st.empty()
                 progress_container(status_placeholder_generate, "Avvio della generazione dei giudizi...", "info")
                 try:
-                    df_to_process = er.read_and_prepare_data_from_excel(st.session_state.uploaded_process_file, sheets_to_read=[st.session_state.selected_sheet], progress_container=lambda ph, msg, type: progress_container(status_placeholder_generate, msg, type))
+                    df_to_process = er.read_and_prepare_data_from_excel(st.session_state.uploaded_process_file, sheets_to_read=[st.session_state.selected_sheet], progress_container=lambda *args, **kwargs: progress_container(status_placeholder_generate, *args, **kwargs))
                     if not df_to_process.empty:
                         with st.spinner("Generazione dei giudizi in corso..."):
-                            st.session_state.process_completed_file = jg.generate_judgments(df_to_process, st.session_state.selected_sheet, lambda ph, msg, type: progress_container(status_placeholder_generate, msg, type))
+                            st.session_state.process_completed_file = jg.generate_judgments(df_to_process, st.session_state.selected_sheet, progress_container=lambda *args, **kwargs: progress_container(status_placeholder_generate, *args, **kwargs))
                         progress_container(status_placeholder_generate, "Giudizi generati con successo!", "success")
                     else:
                         progress_container(status_placeholder_generate, "Il file da processare è vuoto o non contiene dati validi.", "error")
