@@ -4,8 +4,8 @@
 # Utilizza Streamlit per creare un'interfaccia web interattiva.
 # Questo file gestisce l'intero flusso di lavoro:
 # 1. Caricamento dei file di addestramento e/o del modello fine-tunato.
-# 2. Addestramento (fine-tuning) del modello.
-# 3. Caricamento del file Excel da completare.
+# 2. Addestramento (fine-tuning) del modello su TUTTI i fogli di lavoro.
+# 3. Caricamento del file Excel da completare con selezione del foglio.
 # 4. Generazione dei giudizi per il file caricato.
 # 5. Download del file Excel completato.
 #
@@ -16,7 +16,8 @@
 # - Pulizia finale: vengono rimosse le righe con giudizi vuoti.
 #
 # Gestione dei Fogli:
-# - Vengono letti tutti i fogli tranne 'Prototipo' e 'Medie'.
+# - Vengono letti tutti i fogli per l'addestramento tranne 'Prototipo' e 'Medie'.
+# - Per la generazione, l'utente seleziona il foglio esatto da processare.
 #
 # Identificazione Colonne:
 # - "Giudizio" e "Descrizione" sono cercate in modo flessibile.
@@ -60,6 +61,7 @@ class ExcelReader:
                 row = df.iloc[i].astype(str).str.lower().tolist()
                 row_str = " ".join(row)
                 
+                # Cerca contemporaneamente "descrizione" e "giudizio" nella stessa riga
                 if re.search(r'\bdescrizione\b', row_str) and re.search(r'\bgiudizio\b', row_str):
                     header_row_index = i
                     headers = df.iloc[header_row_index].astype(str).tolist()
@@ -99,7 +101,9 @@ class ExcelReader:
                 empty_count = 0
             
             if empty_count >= 2:
-                return df.iloc[:, :i+2]
+                # Se ne trovo due vuote, ritorno il DataFrame fino a due colonne prima
+                # dell'ultima colonna vuota.
+                return df.iloc[:, :i + 1] 
         
         return df
         
@@ -139,7 +143,7 @@ class ExcelReader:
             df = df.iloc[header_row_index + 1:].reset_index(drop=True)
 
             # Tronca le righe basandosi sulla colonna 'pos'
-            if pos_col:
+            if pos_col and pos_col in df.columns:
                 try:
                     pos_df = df[pos_col].dropna().astype(str).str.strip().str.lower()
                     last_valid_pos_idx = -1
@@ -173,6 +177,7 @@ class ExcelReader:
                 if pd.notna(target_text) and target_text:
                     input_parts = []
                     for key, value in row_dict.items():
+                        # Aggiunta di un controllo per evitare errori se la colonna non esiste
                         if pd.notna(value) and str(key).strip().lower() not in excluded_cols and str(key).strip().lower() != str(judgment_col).strip().lower():
                             input_parts.append(f"{key}: {value}")
                     
@@ -442,7 +447,7 @@ with sidebar_col:
 # ==============================================================================
 with main_col:
     st.header("1. Addestramento del Modello 🧠")
-    st.info("Carica uno o più file Excel per creare o aggiornare il corpus di addestramento. Le colonne 'Descrizione' e 'Giudizio' verranno utilizzate per il fine-tuning del modello.")
+    st.info("Carica uno o più file Excel per creare o aggiornare il corpus di addestramento. **Tutti i fogli di lavoro** (esclusi 'Prototipo' e 'Medie') verranno utilizzati per il fine-tuning del modello.")
     
     # Placeholder per i messaggi di stato
     st.session_state.status_placeholder = st.empty()
@@ -455,33 +460,16 @@ with main_col:
         key="uploader_trainer"
     )
     
-    # Aggiorno lo stato dei file caricati
-    if uploaded_files_trainer:
-        st.session_state.uploaded_files = uploaded_files_trainer
-        try:
-            first_file = uploaded_files_trainer[0]
-            sheet_names = er.get_excel_sheet_names(first_file)
-            st.session_state.selected_sheet_trainer = st.selectbox(
-                "Seleziona il foglio di lavoro da utilizzare per l'addestramento:",
-                sheet_names,
-                key="sheet_select_trainer"
-            )
-        except Exception as e:
-            progress_container(f"Errore nella lettura dei fogli del file: {e}", "error")
-            st.error(f"Errore: {traceback.format_exc()}")
-        
     if st.button("Avvia Addestramento"):
-        if st.session_state.uploaded_files:
+        if uploaded_files_trainer:
             try:
                 progress_container("Lettura dei file e preparazione del corpus...", "info")
                 new_df = pd.DataFrame()
-                for file in st.session_state.uploaded_files:
-                    if st.session_state.selected_sheet_trainer:
-                        df_temp = er.read_and_prepare_data_from_excel(file, [st.session_state.selected_sheet_trainer], lambda msg, type: progress_container(msg, type))
-                        new_df = pd.concat([new_df, df_temp], ignore_index=True)
-                    else:
-                        progress_container("Seleziona un foglio di lavoro.", "warning")
-                        continue
+                for file in uploaded_files_trainer:
+                    # Per l'addestramento, leggo TUTTI i fogli
+                    all_sheet_names = er.get_excel_sheet_names(file)
+                    df_temp = er.read_and_prepare_data_from_excel(file, all_sheet_names, lambda msg, type: progress_container(msg, type))
+                    new_df = pd.concat([new_df, df_temp], ignore_index=True)
 
                 st.session_state.corpus_df = cb.build_or_update_corpus(new_df, lambda msg, type: progress_container(msg, type))
                 
@@ -500,7 +488,7 @@ with main_col:
                 progress_container(f"Errore durante il processo di addestramento: {e}", "error")
                 st.error(f"Errore: {traceback.format_exc()}")
         else:
-            st.warning("Per addestrare il modello, devi prima caricare almeno un file e selezionare un foglio.")
+            st.warning("Per addestrare il modello, devi prima caricare almeno un file.")
 
 st.markdown("---")
 
@@ -509,7 +497,7 @@ st.markdown("---")
 # ==============================================================================
 with main_col:
     st.header("2. Generazione dei Giudizi 🤖")
-    st.info("Carica il file Excel che vuoi completare. L'applicazione genererà i giudizi per le righe mancanti.")
+    st.info("Carica il file Excel che vuoi completare e **seleziona il foglio esatto** su cui lavorare. L'applicazione genererà i giudizi per le righe mancanti.")
     
     # Caricamento del file per la generazione
     uploaded_process_file = st.file_uploader(
@@ -535,7 +523,8 @@ with main_col:
         if st.session_state.model_ready:
             if st.session_state.uploaded_process_file and st.session_state.selected_sheet_process:
                 try:
-                    progress_container("Lettura del file...", "info")
+                    progress_container(f"Lettura del foglio '{st.session_state.selected_sheet_process}'...", "info")
+                    # Qui leggo solo il foglio selezionato
                     df = er.read_and_prepare_data_from_excel(st.session_state.uploaded_process_file, [st.session_state.selected_sheet_process], lambda msg, type: progress_container(msg, type))
                     
                     if not df.empty:
@@ -551,7 +540,7 @@ with main_col:
                     progress_container(f"Errore nella generazione dei giudizi: {e}", "error")
                     st.error(f"Errore: {traceback.format_exc()}")
             else:
-                st.warning("Per generare i giudizi, devi prima caricare un file nella sezione '2. Generazione dei Giudizi'.")
+                st.warning("Per generare i giudizi, devi prima caricare un file e selezionare il foglio.")
         else:
             st.warning("Per generare i giudizi, devi prima addestrare un modello nella sezione '1. Addestramento del Modello'.")
 
@@ -565,19 +554,19 @@ with main_col:
 
     if st.session_state.process_completed_file is not None:
         st.write("### Scarica il file completato")
-        st.write("Di seguito, puoi vedere l'anteprima del file con i giudizi generati e scaricare il documento completo.")
+        st.write(f"Di seguito, puoi vedere l'anteprima del file con i giudizi generati e scaricare il documento completo. I dati verranno scritti nel foglio **'{st.session_state.selected_sheet_process}'**.")
         
         st.dataframe(st.session_state.process_completed_file)
         
         output_buffer = BytesIO()
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
-            st.session_state.process_completed_file.to_excel(writer, index=False, sheet_name=st.session_state.selected_sheet)
+            st.session_state.process_completed_file.to_excel(writer, index=False, sheet_name=st.session_state.selected_sheet_process)
         output_buffer.seek(0)
         
         st.download_button(
             label="Scarica il file aggiornato",
             data=output_buffer,
-            file_name=f"Giudizi_Generati_{st.session_state.selected_sheet}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            file_name=f"Giudizi_Generati_{st.session_state.selected_sheet_process}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
