@@ -39,8 +39,6 @@ def find_header_row_and_columns(df):
     Trova la riga di intestazione e le posizioni delle colonne 'Giudizio' e 'pos'.
     Scansiona le prime 50 righe per trovare l'intestazione.
     """
-    giudizio_col_name = None
-    pos_col_name = None
     header_row_index = None
 
     # Normalizziamo i nomi delle colonne da cercare per una ricerca case-insensitive
@@ -49,36 +47,37 @@ def find_header_row_and_columns(df):
 
     # Scansiona le prime 50 righe per trovare l'intestazione
     for i in range(min(50, len(df))):
-        row = df.iloc[i].astype(str)
         # Cerchiamo la colonna 'Giudizio' nell'intestazione
-        if any(re.search(target_giudizio, str(cell)) for cell in row):
+        row_str = df.iloc[i].astype(str).str.strip()
+        if any(re.search(target_giudizio, cell) for cell in row_str):
             header_row_index = i
             break
     
     if header_row_index is None:
         raise ValueError("Impossibile trovare la riga di intestazione che contiene la parola 'Giudizio' o un suo sinonimo.")
 
-    # Usiamo la riga trovata come intestazione temporanea per cercare le colonne
-    header_row = df.iloc[header_row_index].astype(str)
+    # Imposta la riga trovata come intestazione del DataFrame e pulisce i nomi
+    df.columns = make_columns_unique(df.iloc[header_row_index].astype(str).str.strip().tolist())
     
-    # Cerchiamo la colonna 'Giudizio'
-    matches_giudizio = [re.search(target_giudizio, col) for col in header_row]
-    if any(matches_giudizio):
-        giudizio_col_name = header_row[matches_giudizio.index(next(m for m in matches_giudizio if m))]
+    giudizio_col_name = None
+    pos_col_name = None
     
-    # Cerchiamo la colonna 'pos'
-    matches_pos = [re.search(target_pos, col) for col in header_row]
-    if any(matches_pos):
-        pos_col_name = header_row[matches_pos.index(next(m for m in matches_pos if m))]
-        
-    # Fallback per la colonna 'Giudizio'
+    # Ora che i nomi delle colonne sono puliti, cerchiamo le colonne chiave
+    for col in df.columns:
+        if re.search(target_giudizio, col):
+            giudizio_col_name = col
+        if re.search(target_pos, col):
+            pos_col_name = col
+
+    # Fallback per la colonna 'Giudizio' se non è stata trovata
     if not giudizio_col_name:
         # Assumiamo che la colonna H (indice 7) sia la destinazione
         if 7 < len(df.columns):
             giudizio_col_name = df.columns[7]
         else:
             raise ValueError("Impossibile trovare la colonna 'Giudizio' e la colonna H non esiste.")
-    
+            
+    # Fallback per la colonna 'pos'
     if not pos_col_name:
         # Prova a trovare la colonna 'pos' in base al suo contenuto
         for col in df.columns:
@@ -184,10 +183,8 @@ def read_and_prepare_data_from_excel(file_object, progress_container, sheets_to_
                 progress_container(f"Elaborazione del foglio '{sheet}'...", "info")
                 
                 # Trova la riga di intestazione e le colonne chiave
-                header_row_index, giudizio_col_name, pos_col_name = find_header_row_and_columns(df.copy())
+                header_row_index, giudizio_col_name, pos_col_name = find_header_row_and_columns(df)
                 
-                # Imposta la riga di intestazione
-                df.columns = make_columns_unique(df.iloc[header_row_index].astype(str).str.strip().tolist())
                 df = df.iloc[header_row_index + 1:].reset_index(drop=True)
 
                 # Tronca il DataFrame in base alla colonna 'pos'
@@ -207,7 +204,14 @@ def read_and_prepare_data_from_excel(file_object, progress_container, sheets_to_
                 # Preparazione dei dati per il fine-tuning
                 data_for_dataset = []
                 # Crea una lista di colonne da escludere, in modo case-insensitive
-                cols_to_exclude = {col.lower().strip() for col in ['alunno', 'assenti', 'cnt', 'pos', 'giudizio', pos_col_name]}
+                cols_to_exclude = {col.lower().strip() for col in ['alunno', 'assenti', 'cnt', 'pos']}
+                
+                # Aggiungi il nome della colonna 'pos' trovato
+                if pos_col_name:
+                    cols_to_exclude.add(pos_col_name.lower().strip())
+                # Aggiungi il nome della colonna 'giudizio' trovato
+                if giudizio_col_name:
+                    cols_to_exclude.add(giudizio_col_name.lower().strip())
 
                 # Crea i prompt e i target
                 for _, row in df.iterrows():
@@ -266,10 +270,8 @@ def read_single_sheet(file_object, sheet_name, progress_container):
             return None
 
         # Trova la riga di intestazione e le colonne chiave
-        header_row_index, giudizio_col_name, pos_col_name = find_header_row_and_columns(df.copy())
+        header_row_index, giudizio_col_name, pos_col_name = find_header_row_and_columns(df)
         
-        # Imposta la riga di intestazione
-        df.columns = make_columns_unique(df.iloc[header_row_index].astype(str).str.strip().tolist())
         df = df.iloc[header_row_index + 1:].reset_index(drop=True)
         
         # Tronca il DataFrame in base alla colonna 'pos'
