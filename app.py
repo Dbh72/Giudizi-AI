@@ -1,3 +1,57 @@
+# Importa il modulo 'importlib' per importare dinamicamente le librerie.
+# 'sys' è necessario per ottenere la versione di Python.
+import importlib
+import sys
+from importlib.metadata import version, PackageNotFoundError
+
+# Definisce un elenco di librerie chiave di cui vogliamo conoscere la versione.
+# Questa lista può essere personalizzata a seconda delle tue esigenze.
+libraries = [
+    'pandas',
+    'openpyxl',
+    'datasets',
+    'sentence-transformers',
+    'peft',
+    'torch',
+    'gradio'
+]
+
+print("--- Versioni delle Librerie Chiave ---")
+
+# Esegue un ciclo attraverso la lista delle librerie.
+for lib_name in libraries:
+    try:
+        # Tenta di ottenere la versione del pacchetto.
+        ver = version(lib_name)
+        print(f"{lib_name}: {ver}")
+    except PackageNotFoundError:
+        # Se il pacchetto non viene trovato, stampa un messaggio indicativo.
+        print(f"{lib_name}: Non trovato")
+    except Exception as e:
+        # Gestisce altri possibili errori.
+        print(f"{lib_name}: Errore - {e}")
+
+print("-------------------------------------")
+# Stampa la versione di Python attualmente in uso.
+print(f"Versione di Python: {sys.version}")
+
+# =========================================================
+# === Inizia qui il corpo principale del tuo codice app.py ===
+# =========================================================
+
+# import flask
+# app = flask.Flask(__name__)
+#
+# @app.route('/')
+# def home():
+#     return 'Hello, World!'
+#
+# if __name__ == '__main__':
+#     app.run(debug=True)
+
+
+
+
 # ==============================================================================
 # File: app.py
 # L'interfaccia utente principale per l'applicazione di generazione di giudizi.
