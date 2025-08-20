@@ -118,7 +118,6 @@ def progress_container(message, type):
     """
     Gestisce l'aggiornamento del placeholder di stato con un messaggio.
     """
-    # Ho corretto la logica per usare un singolo placeholder che si aggiorna
     if "status_placeholder" not in st.session_state:
         st.session_state.status_placeholder = st.empty()
     
@@ -133,22 +132,23 @@ def progress_container(message, type):
 
 def reset_project_state():
     """
-    Resetta tutti i file del progetto (corpus, modello).
+    Resetta tutti i file del progetto (corpus, modello) e lo stato di sessione.
     """
-    # Elimina il corpus (mock)
-    cb.delete_corpus(lambda msg, type: progress_container(msg, type))
-    # Elimina il modello (mock)
-    mt.delete_model(lambda msg, type: progress_container(msg, type))
-    progress_container("Progetto resettato. Tutti i dati sono stati eliminati.", "success")
-    # Reset del session state per i file caricati
-    for key in st.session_state.keys():
-        if key.startswith('uploaded_'):
+    try:
+        # Elimina il corpus (mock)
+        cb.delete_corpus(lambda msg, type: progress_container(msg, type))
+        # Elimina il modello (mock)
+        mt.delete_model(lambda msg, type: progress_container(msg, type))
+        progress_container("Progetto resettato. Tutti i dati sono stati eliminati.", "success")
+        
+        # Reset dello stato di sessione
+        for key in list(st.session_state.keys()):
             del st.session_state[key]
-    
-    if 'corpus_df' in st.session_state:
-        del st.session_state.corpus_df
-    
-    # Riavvia l'app
+        
+    except Exception as e:
+        progress_container(f"Errore durante il reset del progetto: {e}", "error")
+        st.error(f"Errore: {traceback.format_exc()}")
+        
     st.experimental_rerun()
     
 def get_session_id():
@@ -172,6 +172,7 @@ st.set_page_config(
 )
 
 # Inizializzazione di Streamlit session state per mantenere lo stato dell'app
+# Inizializzazione Condizionale per evitare errori all'avvio
 if 'corpus_df' not in st.session_state:
     st.session_state.corpus_df = pd.DataFrame()
 if 'model_ready' not in st.session_state:
@@ -222,8 +223,6 @@ with sidebar_col:
     # Bottone per resettare lo stato del progetto
     if st.button("Resetta tutto il progetto"):
         reset_project_state()
-        st.session_state.model_ready = False
-        st.experimental_rerun()
         
     st.markdown("---")
     st.write("### Stato Attuale")
@@ -260,11 +259,6 @@ with main_col:
         st.session_state.uploaded_files = uploaded_files_trainer
         try:
             # Mostra i fogli di lavoro e permette di selezionarne uno
-            # L'ultima correzione è stata applicata a excel_reader.py. La funzione
-            # `read_excel_file` non esisteva e la logica era complessa.
-            # Ora usiamo `read_and_prepare_data_from_excel` che accetta
-            # una lista di sheet names. Qui, per coerenza, ho semplificato la
-            # selezione.
             first_file = uploaded_files_trainer[0]
             sheet_names = er.get_excel_sheet_names(first_file)
             st.session_state.selected_sheet_trainer = st.selectbox(
@@ -283,15 +277,19 @@ with main_col:
                 progress_container("Lettura dei file e preparazione del corpus...", "info")
                 new_df = pd.DataFrame()
                 for file in st.session_state.uploaded_files:
-                    df_temp = er.read_and_prepare_data_from_excel(file, [st.session_state.selected_sheet_trainer], lambda msg, type: progress_container(msg, type))
-                    new_df = pd.concat([new_df, df_temp], ignore_index=True)
+                    # Ho aggiunto un controllo per il foglio selezionato
+                    if st.session_state.selected_sheet_trainer:
+                        df_temp = er.read_and_prepare_data_from_excel(file, [st.session_state.selected_sheet_trainer], lambda msg, type: progress_container(msg, type))
+                        new_df = pd.concat([new_df, df_temp], ignore_index=True)
+                    else:
+                        progress_container("Seleziona un foglio di lavoro.", "warning")
+                        continue
 
                 # Aggiorna il corpus esistente
                 st.session_state.corpus_df = cb.build_or_update_corpus(new_df, lambda msg, type: progress_container(msg, type))
                 
                 # Avvia il fine-tuning se il corpus non è vuoto
                 if not st.session_state.corpus_df.empty:
-                    # Correzione: La funzione corretta da chiamare è mt.train_model
                     st.session_state.model, st.session_state.tokenizer = mt.train_model(st.session_state.corpus_df, lambda msg, type: progress_container(msg, type))
                     if st.session_state.model and st.session_state.tokenizer:
                         st.session_state.model_ready = True
