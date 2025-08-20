@@ -24,7 +24,7 @@ import json
 import time
 
 # Importa i moduli personalizzati
-import excel_reader as er
+import excel_reader_v2 as er # IMPORTAZIONE CORRETTA
 import model_trainer as mt
 import judgment_generator as jg
 import corpus_builder as cb
