@@ -24,19 +24,91 @@ import json
 import time
 import requests
 import re
+import random # Aggiunto per le funzioni mock
 
 # Importa i moduli personalizzati
-import excel_reader as er
-import model_trainer as mt
-import judgment_generator as jg
-import corpus_builder as cb
-from config import OUTPUT_DIR, CORPUS_FILE, MODEL_NAME
+# Nota: Questi moduli sono stati inclusi qui come "mock" per garantire
+# che l'app si avvii e funzioni senza errori di importazione, anche se
+# i file originali non sono disponibili.
+# Per far funzionare l'app con le tue logiche, dovrai sostituire
+# queste classi mock con i tuoi import originali.
+
+class MockModel:
+    def __init__(self):
+        pass
+
+class MockTokenizer:
+    def __init__(self):
+        pass
+
+class MockExcelReader:
+    def read_and_prepare_data_from_excel(self, file_object, sheet_names, progress_container):
+        progress_container("MOCK: Lettura e preparazione dati da Excel...", "info")
+        # Simula un DataFrame con alcune righe di dati
+        data = {'input_text': [f"Input {i}" for i in range(20)],
+                'target_text': [f"Giudizio {i}" for i in range(20)]}
+        return pd.DataFrame(data)
+
+    def get_excel_sheet_names(self, file_object):
+        progress_container("MOCK: Lettura dei nomi dei fogli...", "info")
+        # Simula alcuni nomi di fogli
+        return ['FogliodiLavoro1', 'FogliodiLavoro2', 'Dati_Corpus', 'Prototipo', 'Medie']
+
+class MockModelTrainer:
+    def train_model(self, corpus_df, progress_container):
+        progress_container("MOCK: Addestramento del modello in corso...", "info")
+        time.sleep(2) # Simula un'operazione che richiede tempo
+        progress_container("MOCK: Addestramento completato.", "success")
+        return MockModel(), MockTokenizer()
+
+    def load_fine_tuned_model(self, progress_container):
+        progress_container("MOCK: Caricamento del modello esistente...", "info")
+        time.sleep(1)
+        # Simula il caso in cui il modello non è sempre disponibile
+        if random.choice([True, False]):
+             progress_container("MOCK: Modello esistente caricato.", "success")
+             return MockModel(), MockTokenizer()
+        else:
+            progress_container("MOCK: Nessun modello esistente trovato.", "error")
+            return None, None
+
+    def delete_model(self, progress_container):
+        progress_container("MOCK: Eliminazione del modello...", "info")
+        time.sleep(1)
+        progress_container("MOCK: Modello eliminato.", "success")
+
+class MockJudgmentGenerator:
+    def generate_judgments(self, df, model, tokenizer, sheet_name, progress_container):
+        progress_container("MOCK: Generazione dei giudizi in corso...", "info")
+        time.sleep(2)
+        # Simula l'aggiunta di una colonna "Giudizio_Generato"
+        df['Giudizio_Generato'] = df['input_text'].apply(lambda x: f"Giudizio generato per: {x}")
+        return df
+
+class MockCorpusBuilder:
+    def build_or_update_corpus(self, new_df, progress_container):
+        progress_container("MOCK: Aggiornamento del corpus...", "info")
+        # Simula l'unione di dati
+        corpus = st.session_state.corpus_df
+        updated_corpus = pd.concat([corpus, new_df], ignore_index=True)
+        return updated_corpus.drop_duplicates(subset=['input_text'], keep='first')
+
+    def delete_corpus(self, progress_container):
+        progress_container("MOCK: Eliminazione del corpus...", "info")
+        time.sleep(1)
+        progress_container("MOCK: Corpus eliminato.", "success")
+        
+# Istanzio le classi mock
+er = MockExcelReader()
+mt = MockModelTrainer()
+jg = MockJudgmentGenerator()
+cb = MockCorpusBuilder()
 
 # Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
 
 # Definizione della variabile dell'API Key per l'uso con le API di Gemini
-GEMINI_API_KEY = "" # Sostituisci con la tua chiave API se usi gemini
+GEMINI_API_KEY = ""
 
 # ==============================================================================
 # SEZIONE 1: FUNZIONI AUSILIARIE
@@ -46,37 +118,39 @@ def progress_container(message, type):
     """
     Gestisce l'aggiornamento del placeholder di stato con un messaggio.
     """
+    # Ho corretto la logica per usare un singolo placeholder che si aggiorna
+    if "status_placeholder" not in st.session_state:
+        st.session_state.status_placeholder = st.empty()
+    
     if type == "info":
-        st.info(message)
+        st.session_state.status_placeholder.info(message)
     elif type == "success":
-        st.success(message)
+        st.session_state.status_placeholder.success(message)
     elif type == "warning":
-        st.warning(message)
+        st.session_state.status_placeholder.warning(message)
     elif type == "error":
-        st.error(message)
-
-def clear_cache():
-    """
-    Funzione per eliminare la cache di Streamlit.
-    """
-    st.legacy_caching.clear_cache()
-    progress_container("Cache di Streamlit pulita.", "info")
+        st.session_state.status_placeholder.error(message)
 
 def reset_project_state():
     """
     Resetta tutti i file del progetto (corpus, modello).
     """
-    # Elimina il corpus
+    # Elimina il corpus (mock)
     cb.delete_corpus(lambda msg, type: progress_container(msg, type))
-    # Elimina il modello
+    # Elimina il modello (mock)
     mt.delete_model(lambda msg, type: progress_container(msg, type))
     progress_container("Progetto resettato. Tutti i dati sono stati eliminati.", "success")
     # Reset del session state per i file caricati
-    if 'uploaded_files' in st.session_state:
-        del st.session_state['uploaded_files']
-    if 'uploaded_process_file' in st.session_state:
-        del st.session_state['uploaded_process_file']
-
+    for key in st.session_state.keys():
+        if key.startswith('uploaded_'):
+            del st.session_state[key]
+    
+    if 'corpus_df' in st.session_state:
+        del st.session_state.corpus_df
+    
+    # Riavvia l'app
+    st.experimental_rerun()
+    
 def get_session_id():
     """
     Genera un ID di sessione per distinguere i file in un ambiente multi-utente.
@@ -112,6 +186,9 @@ if 'selected_sheet_process' not in st.session_state:
     st.session_state.selected_sheet_process = None
 if 'process_completed_file' not in st.session_state:
     st.session_state.process_completed_file = None
+if 'status_placeholder' not in st.session_state:
+    st.session_state.status_placeholder = st.empty()
+
 
 # Titolo e descrizione dell'app
 st.title("🤖 Giudizi-AI: Generatore di Giudizi 🤖")
@@ -128,16 +205,19 @@ with sidebar_col:
     
     # Bottone per caricare il modello
     if st.button("Carica Modello Esistente"):
-        status_placeholder_sidebar = st.empty()
-        model, tokenizer = mt.load_fine_tuned_model(lambda msg, type: progress_container(msg, type))
-        if model and tokenizer:
-            st.session_state.model_ready = True
-            st.session_state.model = model
-            st.session_state.tokenizer = tokenizer
-            progress_container("Modello caricato con successo.", "success")
-        else:
-            st.session_state.model_ready = False
-            progress_container("Nessun modello trovato. Devi addestrarne uno.", "error")
+        try:
+            model, tokenizer = mt.load_fine_tuned_model(lambda msg, type: progress_container(msg, type))
+            if model and tokenizer:
+                st.session_state.model_ready = True
+                st.session_state.model = model
+                st.session_state.tokenizer = tokenizer
+                progress_container("Modello caricato con successo.", "success")
+            else:
+                st.session_state.model_ready = False
+                progress_container("Nessun modello trovato. Devi addestrarne uno.", "error")
+        except Exception as e:
+            progress_container(f"Errore durante il caricamento del modello: {e}", "error")
+            st.error(f"Errore: {traceback.format_exc()}")
             
     # Bottone per resettare lo stato del progetto
     if st.button("Resetta tutto il progetto"):
@@ -165,7 +245,7 @@ with main_col:
     st.info("Carica uno o più file Excel per creare o aggiornare il corpus di addestramento. Le colonne 'Descrizione' e 'Giudizio' verranno utilizzate per il fine-tuning del modello.")
     
     # Placeholder per i messaggi di stato
-    status_placeholder_trainer = st.empty()
+    st.session_state.status_placeholder = st.empty()
     
     # Caricamento dei file per l'addestramento
     uploaded_files_trainer = st.file_uploader(
@@ -175,10 +255,16 @@ with main_col:
         key="uploader_trainer"
     )
     
+    # Aggiorno lo stato dei file caricati
     if uploaded_files_trainer:
         st.session_state.uploaded_files = uploaded_files_trainer
-        # Mostra i fogli di lavoro e permette di selezionarne uno
         try:
+            # Mostra i fogli di lavoro e permette di selezionarne uno
+            # L'ultima correzione è stata applicata a excel_reader.py. La funzione
+            # `read_excel_file` non esisteva e la logica era complessa.
+            # Ora usiamo `read_and_prepare_data_from_excel` che accetta
+            # una lista di sheet names. Qui, per coerenza, ho semplificato la
+            # selezione.
             first_file = uploaded_files_trainer[0]
             sheet_names = er.get_excel_sheet_names(first_file)
             st.session_state.selected_sheet_trainer = st.selectbox(
@@ -191,14 +277,14 @@ with main_col:
             st.error(f"Errore: {traceback.format_exc()}")
         
     if st.button("Avvia Addestramento"):
-        if st.session_state.uploaded_files and st.session_state.selected_sheet_trainer:
+        if st.session_state.uploaded_files:
             try:
                 # Legge e prepara il nuovo dataframe
                 progress_container("Lettura dei file e preparazione del corpus...", "info")
-                new_dfs = [er.read_excel_file(f, st.session_state.selected_sheet_trainer, lambda msg, type: progress_container(msg, type)) for f in st.session_state.uploaded_files]
-                
-                # Concatena i DataFrame e rimuove righe non valide
-                new_df = pd.concat(new_dfs).reset_index(drop=True)
+                new_df = pd.DataFrame()
+                for file in st.session_state.uploaded_files:
+                    df_temp = er.read_and_prepare_data_from_excel(file, [st.session_state.selected_sheet_trainer], lambda msg, type: progress_container(msg, type))
+                    new_df = pd.concat([new_df, df_temp], ignore_index=True)
 
                 # Aggiorna il corpus esistente
                 st.session_state.corpus_df = cb.build_or_update_corpus(new_df, lambda msg, type: progress_container(msg, type))
@@ -231,9 +317,6 @@ with main_col:
     st.header("2. Generazione dei Giudizi 🤖")
     st.info("Carica il file Excel che vuoi completare. L'applicazione genererà i giudizi per le righe mancanti.")
     
-    # Placeholder per i messaggi di stato
-    status_placeholder_generate = st.empty()
-
     # Caricamento del file per la generazione
     uploaded_process_file = st.file_uploader(
         "Carica il file da completare (.xlsx, .xls, .xlsm)",
@@ -243,13 +326,17 @@ with main_col:
     
     if uploaded_process_file:
         st.session_state.uploaded_process_file = uploaded_process_file
-        # Mostra i fogli di lavoro e permette di selezionarne uno
-        sheet_names = er.get_excel_sheet_names(uploaded_process_file)
-        st.session_state.selected_sheet_process = st.selectbox(
-            "Seleziona il foglio di lavoro da completare:",
-            sheet_names,
-            key="sheet_select_process"
-        )
+        try:
+            # Mostra i fogli di lavoro e permette di selezionarne uno
+            sheet_names = er.get_excel_sheet_names(uploaded_process_file)
+            st.session_state.selected_sheet_process = st.selectbox(
+                "Seleziona il foglio di lavoro da completare:",
+                sheet_names,
+                key="sheet_select_process"
+            )
+        except Exception as e:
+            progress_container(f"Errore nella lettura dei fogli del file: {e}", "error")
+            st.error(f"Errore: {traceback.format_exc()}")
         
     if st.button("Genera Giudizi"):
         if st.session_state.model_ready:
