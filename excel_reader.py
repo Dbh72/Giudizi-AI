@@ -1,5 +1,5 @@
 # ==============================================================================
-# File: excel_reader.py
+# File: excel_reader_v2.py
 # Logica per la preparazione dei dati da file Excel, integrando le
 # funzionalità di '33 Funziona.txt' per una lettura più robusta.
 # ==============================================================================
@@ -43,7 +43,10 @@ def find_header_row_and_columns(df):
 
     # Normalizziamo i nomi delle colonne da cercare per una ricerca case-insensitive
     target_giudizio = re.compile(r"giudizio|valutazione|descrizione", re.IGNORECASE)
-    target_pos = re.compile(r"pos|posizione|numero", re.IGNORECASE)
+    target_pos = re.compile(r"pos|posizione|numero|n\.", re.IGNORECASE)
+    target_alunno = re.compile(r"alunno|alunni|studente|studenti", re.IGNORECASE)
+    target_assenti = re.compile(r"assenti", re.IGNORECASE)
+    target_cnt = re.compile(r"cnt", re.IGNORECASE)
 
     # Scansiona le prime 50 righe per trovare l'intestazione
     for i in range(min(50, len(df))):
@@ -54,13 +57,23 @@ def find_header_row_and_columns(df):
             break
     
     if header_row_index is None:
-        raise ValueError("Impossibile trovare la riga di intestazione che contiene la parola 'Giudizio' o un suo sinonimo.")
-
+        # Fallback se non si trova la parola 'giudizio' o sinonimi
+        giudizio_col_name = None
+        if 7 < len(df.columns):
+            giudizio_col_name = df.columns[7]
+            # Assumiamo che la riga di intestazione sia la prima
+            header_row_index = 0
+        else:
+            raise ValueError("Impossibile trovare la riga di intestazione che contiene la parola 'Giudizio' o un suo sinonimo. Inoltre, la colonna H non esiste.")
+            
     # Imposta la riga trovata come intestazione del DataFrame e pulisce i nomi
     df.columns = make_columns_unique(df.iloc[header_row_index].astype(str).str.strip().tolist())
     
     giudizio_col_name = None
     pos_col_name = None
+    alunno_col_name = None
+    assenti_col_name = None
+    cnt_col_name = None
     
     # Ora che i nomi delle colonne sono puliti, cerchiamo le colonne chiave
     for col in df.columns:
@@ -68,10 +81,15 @@ def find_header_row_and_columns(df):
             giudizio_col_name = col
         if re.search(target_pos, col):
             pos_col_name = col
+        if re.search(target_alunno, col):
+            alunno_col_name = col
+        if re.search(target_assenti, col):
+            assenti_col_name = col
+        if re.search(target_cnt, col):
+            cnt_col_name = col
 
     # Fallback per la colonna 'Giudizio' se non è stata trovata
     if not giudizio_col_name:
-        # Assumiamo che la colonna H (indice 7) sia la destinazione
         if 7 < len(df.columns):
             giudizio_col_name = df.columns[7]
         else:
@@ -79,19 +97,16 @@ def find_header_row_and_columns(df):
             
     # Fallback per la colonna 'pos'
     if not pos_col_name:
-        # Prova a trovare la colonna 'pos' in base al suo contenuto
         for col in df.columns:
-            # Controllo se le prime 50 righe di questa colonna contengono numeri sequenziali
             try:
                 values = pd.to_numeric(df[col].iloc[:50].dropna(), errors='coerce')
-                # Verifichiamo che ci siano più di un valore unico e che siano in ordine
-                if values.nunique() > 1 and all(values == values.sort_values()):
+                if values.nunique() > 1 and all(values.sort_values().reset_index(drop=True) == values.reset_index(drop=True)):
                     pos_col_name = col
                     break
             except (ValueError, TypeError):
                 continue
     
-    return header_row_index, giudizio_col_name, pos_col_name
+    return header_row_index, giudizio_col_name, pos_col_name, alunno_col_name, assenti_col_name, cnt_col_name
 
 def trim_dataframe_by_numeric_id_column(df, pos_col_name):
     """
@@ -183,7 +198,7 @@ def read_and_prepare_data_from_excel(file_object, progress_container, sheets_to_
                 progress_container(f"Elaborazione del foglio '{sheet}'...", "info")
                 
                 # Trova la riga di intestazione e le colonne chiave
-                header_row_index, giudizio_col_name, pos_col_name = find_header_row_and_columns(df)
+                header_row_index, giudizio_col_name, pos_col_name, alunno_col_name, assenti_col_name, cnt_col_name = find_header_row_and_columns(df)
                 
                 df = df.iloc[header_row_index + 1:].reset_index(drop=True)
 
@@ -204,21 +219,14 @@ def read_and_prepare_data_from_excel(file_object, progress_container, sheets_to_
                 # Preparazione dei dati per il fine-tuning
                 data_for_dataset = []
                 # Crea una lista di colonne da escludere, in modo case-insensitive
-                cols_to_exclude = {col.lower().strip() for col in ['alunno', 'assenti', 'cnt', 'pos']}
+                cols_to_exclude = {giudizio_col_name, alunno_col_name, assenti_col_name, cnt_col_name, pos_col_name}
                 
-                # Aggiungi il nome della colonna 'pos' trovato
-                if pos_col_name:
-                    cols_to_exclude.add(pos_col_name.lower().strip())
-                # Aggiungi il nome della colonna 'giudizio' trovato
-                if giudizio_col_name:
-                    cols_to_exclude.add(giudizio_col_name.lower().strip())
-
                 # Crea i prompt e i target
                 for _, row in df.iterrows():
                     input_text_parts = []
                     # Unisci i dati di tutte le colonne utili nel prompt
                     for col_name, value in row.items():
-                        if col_name.lower().strip() not in cols_to_exclude and pd.notna(value):
+                        if col_name not in cols_to_exclude and pd.notna(value):
                             input_text_parts.append(f"{col_name}: {value}")
                     
                     input_text = " ".join(input_text_parts)
@@ -270,7 +278,7 @@ def read_single_sheet(file_object, sheet_name, progress_container):
             return None
 
         # Trova la riga di intestazione e le colonne chiave
-        header_row_index, giudizio_col_name, pos_col_name = find_header_row_and_columns(df)
+        header_row_index, giudizio_col_name, pos_col_name, alunno_col_name, assenti_col_name, cnt_col_name = find_header_row_and_columns(df)
         
         df = df.iloc[header_row_index + 1:].reset_index(drop=True)
         
