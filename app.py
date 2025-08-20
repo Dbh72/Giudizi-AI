@@ -63,6 +63,7 @@ def train_model(progress_container, corpus_df):
     if st.session_state.fine_tuned_model is not None:
         progress_container("Modello addestrato e salvato con successo!", "success")
         st.session_state.model_trained = True
+        st.session_state.uploaded_file_name = "Corpus addestrato"
 
 def generate_judgments_and_save(file_object, selected_sheet, progress_container):
     """
@@ -137,6 +138,15 @@ if "process_completed" not in st.session_state:
     st.session_state.process_completed = False
 if "selected_sheet" not in st.session_state:
     st.session_state.selected_sheet = None
+
+# Carica il modello pre-esistente all'avvio
+if not st.session_state.model_trained and os.path.exists(os.path.join(OUTPUT_DIR, "final_model")):
+    try:
+        st.session_state.fine_tuned_model, st.session_state.tokenizer = mt.load_fine_tuned_model(st.empty())
+        if st.session_state.fine_tuned_model:
+            st.session_state.model_trained = True
+    except Exception as e:
+        st.error(f"Errore nel caricamento del modello all'avvio: {e}")
 
 st.title("Generatore di Giudizi per la Scuola 📚🤖")
 st.markdown("---")
