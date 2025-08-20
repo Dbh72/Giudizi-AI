@@ -133,8 +133,15 @@ with col2:
             status_placeholder_corpus = st.empty()
             progress_container(status_placeholder_corpus, "Avvio del caricamento e aggiornamento del corpus...", "info")
             try:
+                # Ottieni i nomi di tutti i fogli del file di addestramento
+                all_sheets = er.get_excel_sheet_names(st.session_state.uploaded_training_file)
+                
                 with st.spinner("Elaborazione del file..."):
-                    df_from_excel = er.read_and_prepare_data_from_excel(st.session_state.uploaded_training_file, progress_container=lambda ph, msg, type: progress_container(status_placeholder_corpus, msg, type))
+                    df_from_excel = er.read_and_prepare_data_from_excel(
+                        st.session_state.uploaded_training_file, 
+                        sheets_to_read=all_sheets, # Passa l'argomento richiesto
+                        progress_container=lambda ph, msg, type: progress_container(status_placeholder_corpus, msg, type)
+                    )
                 
                 st.session_state.corpus_df = cb.build_or_update_corpus(df_from_excel, lambda ph, msg, type: progress_container(status_placeholder_corpus, msg, type))
                 progress_container(status_placeholder_corpus, "Corpus aggiornato con successo!", "success")
@@ -247,4 +254,3 @@ with col_status:
         st.info(f"Corpus di addestramento: {len(st.session_state.corpus_df)} righe")
     else:
         st.info("Corpus di addestramento: vuoto")
-
