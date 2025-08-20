@@ -55,7 +55,7 @@ def train_model(progress_container, corpus_df):
     """
     Avvia il processo di addestramento del modello e aggiorna lo stato.
     """
-    progress_container("Addestramento del modello in corso...", "info")
+    progress_container("Avvio dell'addestramento...", "info")
     st.session_state.fine_tuned_model, st.session_state.tokenizer = mt.train_and_save_model(
         corpus_df=corpus_df,
         progress_container=progress_container
@@ -181,6 +181,9 @@ with col2:
                     st.session_state.uploaded_file_name = uploaded_training_file.name
                     if not st.session_state.corpus_df.empty:
                         progress_container(status_placeholder_load, f"Corpus aggiornato con {len(st.session_state.corpus_df)} righe totali.", "success")
+                    else:
+                        progress_container(status_placeholder_load, "Attenzione: Nessun dato valido trovato nel file per aggiornare il corpus. Controlla che i fogli contengano dati validi.", "warning")
+
             except Exception as e:
                 progress_container(status_placeholder_load, f"Errore nel caricamento del file. Controlla il formato e riprova. {e}", "error")
                 st.error("Errore nel caricamento del file. Controlla il formato e riprova.")
