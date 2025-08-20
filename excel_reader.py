@@ -1,5 +1,5 @@
 # ==============================================================================
-# File: excel_reader_v2.py
+# File: excel_reader.py
 # Logica per la preparazione dei dati da file Excel, integrando le
 # funzionalità di '33 Funziona.txt' per una lettura più robusta.
 # ==============================================================================
@@ -34,205 +34,165 @@ def make_columns_unique(columns):
             new_columns.append(original_col)
     return new_columns
 
-def find_header_row_and_columns(df):
+def find_header_row_and_columns(df, progress_container):
     """
-    Trova la riga di intestazione e le posizioni delle colonne 'Giudizio' e 'pos'.
-    Scansiona le prime 50 righe per trovare l'intestazione.
+    Trova la riga di intestazione e le posizioni della colonna 'Giudizio'.
     """
-    header_row_index = None
-
-    # Normalizziamo i nomi delle colonne da cercare per una ricerca case-insensitive
-    target_giudizio = re.compile(r"giudizio|valutazione|descrizione", re.IGNORECASE)
-    target_pos = re.compile(r"pos|posizione|numero|n\.", re.IGNORECASE)
-    target_alunno = re.compile(r"alunno|alunni|studente|studenti", re.IGNORECASE)
-    target_assenti = re.compile(r"assenti", re.IGNORECASE)
-    target_cnt = re.compile(r"cnt", re.IGNORECASE)
-
-    # Scansiona le prime 50 righe per trovare l'intestazione
-    for i in range(min(50, len(df))):
-        # Cerchiamo la colonna 'Giudizio' nell'intestazione
-        row_str = df.iloc[i].astype(str).str.strip()
-        if any(re.search(target_giudizio, cell) for cell in row_str):
-            header_row_index = i
-            break
-    
-    if header_row_index is None:
-        # Fallback se non si trova la parola 'giudizio' o sinonimi
+    try:
         giudizio_col_name = None
-        if 7 < len(df.columns):
-            giudizio_col_name = df.columns[7]
-            # Assumiamo che la riga di intestazione sia la prima
+        header_row_index = -1
+        
+        # Scansiona le prime 10 righe per trovare l'intestazione
+        for i in range(min(10, len(df))):
+            row = df.iloc[i].astype(str).str.lower()
+            if any(re.search(r'\b(giudizio|giudiz)\b', str(cell)) for cell in row):
+                header_row_index = i
+                break
+        
+        # Se non trova una riga di intestazione, usa la prima riga
+        if header_row_index == -1:
+            progress_container("Riga di intestazione non trovata. Supponendo che sia la prima riga.", "warning")
             header_row_index = 0
-        else:
-            raise ValueError("Impossibile trovare la riga di intestazione che contiene la parola 'Giudizio' o un suo sinonimo. Inoltre, la colonna H non esiste.")
-            
-    # Imposta la riga trovata come intestazione del DataFrame e pulisce i nomi
-    df.columns = make_columns_unique(df.iloc[header_row_index].astype(str).str.strip().tolist())
-    
-    giudizio_col_name = None
-    pos_col_name = None
-    alunno_col_name = None
-    assenti_col_name = None
-    cnt_col_name = None
-    
-    # Ora che i nomi delle colonne sono puliti, cerchiamo le colonne chiave
-    for col in df.columns:
-        if re.search(target_giudizio, col):
-            giudizio_col_name = col
-        if re.search(target_pos, col):
-            pos_col_name = col
-        if re.search(target_alunno, col):
-            alunno_col_name = col
-        if re.search(target_assenti, col):
-            assenti_col_name = col
-        if re.search(target_cnt, col):
-            cnt_col_name = col
 
-    # Fallback per la colonna 'Giudizio' se non è stata trovata
-    if not giudizio_col_name:
-        if 7 < len(df.columns):
-            giudizio_col_name = df.columns[7]
-        else:
-            raise ValueError("Impossibile trovare la colonna 'Giudizio' e la colonna H non esiste.")
-            
-    # Fallback per la colonna 'pos'
-    if not pos_col_name:
+        df.columns = df.iloc[header_row_index]
+        df = df.iloc[header_row_index + 1:].reset_index(drop=True)
+
+        # Rende i nomi delle colonne unici
+        df.columns = make_columns_unique(df.columns.tolist())
+
+        # Cerca la colonna "Giudizio" in modo flessibile
         for col in df.columns:
-            try:
-                values = pd.to_numeric(df[col].iloc[:50].dropna(), errors='coerce')
-                if values.nunique() > 1 and all(values.sort_values().reset_index(drop=True) == values.reset_index(drop=True)):
-                    pos_col_name = col
-                    break
-            except (ValueError, TypeError):
-                continue
-    
-    return header_row_index, giudizio_col_name, pos_col_name, alunno_col_name, assenti_col_name, cnt_col_name
+            if re.search(r'\b(giudizio|giudiz)\b', str(col).lower()):
+                giudizio_col_name = col
+                progress_container(f"Colonna 'Giudizio' trovata: '{giudizio_col_name}'", "info")
+                break
+        
+        # Fallback sulla colonna H (indice 7) se non trovata
+        if giudizio_col_name is None:
+            if len(df.columns) > 7:
+                giudizio_col_name = df.columns[7]
+                progress_container(f"Colonna 'Giudizio' non trovata. Utilizzo la colonna H ('{giudizio_col_name}') come fallback.", "warning")
+            else:
+                progress_container("Impossibile trovare la colonna 'Giudizio' e la colonna H non esiste.", "error")
+                return None, None
 
-def trim_dataframe_by_numeric_id_column(df, pos_col_name):
-    """
-    Tronca il DataFrame in base alla sequenza numerica nella colonna 'pos'.
-    """
-    if pos_col_name is None or pos_col_name not in df.columns:
-        return df
+        return df, giudizio_col_name
 
-    # Converti la colonna 'pos' in tipo numerico, gestendo gli errori
-    df['temp_pos'] = pd.to_numeric(df[pos_col_name], errors='coerce')
-    
-    # Rimuovi le righe dove la colonna 'pos' non è un numero valido
-    df = df.dropna(subset=['temp_pos'])
-    
-    if df.empty:
-        return df
-
-    # Trova l'ultimo indice dove la sequenza numerica è consecutiva
-    max_idx = 0
-    start_num = int(df['temp_pos'].iloc[0])
-    for i in range(len(df)):
-        if int(df['temp_pos'].iloc[i]) == start_num + i:
-            max_idx = i
-        else:
-            break
-            
-    df = df.iloc[:max_idx + 1]
-    df = df.drop(columns=['temp_pos'])
-    return df
+    except Exception as e:
+        progress_container(f"Errore nella ricerca dell'intestazione: {e}", "error")
+        progress_container(f"Traceback: {traceback.format_exc()}", "error")
+        return None, None
 
 def trim_dataframe_by_empty_columns(df):
     """
-    Rimuove le colonne vuote consecutive dalla destra del DataFrame.
+    Rimuove le colonne vuote consecutive dalla destra.
     """
-    cols_to_drop = []
-    empty_count = 0
-    # Itera sulle colonne da destra a sinistra
-    for col in reversed(df.columns):
-        if df[col].isnull().all():
-            empty_count += 1
-            cols_to_drop.append(col)
+    empty_cols = 0
+    cols_to_keep = len(df.columns)
+    for i in range(len(df.columns) - 1, -1, -1):
+        if df.iloc[:, i].isnull().all():
+            empty_cols += 1
         else:
-            empty_count = 0
-        if empty_count >= 2:
+            break
+        
+    return df.iloc[:, :cols_to_keep - empty_cols]
+
+def trim_dataframe_by_numeric_id_column(df):
+    """
+    Tronca il DataFrame quando la sequenza numerica in una colonna di ID si interrompe.
+    La colonna di ID viene identificata in modo flessibile.
+    """
+    id_col = None
+    # Identifica la colonna 'pos' o simili
+    for col in df.columns:
+        if re.search(r'\b(pos|id|numero)\b', str(col).lower()):
+            id_col = col
             break
             
-    if cols_to_drop:
-        df = df.drop(columns=cols_to_drop)
+    if id_col is None:
+        return df
+
+    # Converte la colonna in tipo numerico, gestendo gli errori
+    df[id_col] = pd.to_numeric(df[id_col], errors='coerce')
+    
+    last_valid_index = -1
+    for i in range(len(df)):
+        if not pd.isna(df.loc[i, id_col]) and isinstance(df.loc[i, id_col], (int, float)):
+            last_valid_index = i
+        else:
+            break
+            
+    if last_valid_index != -1:
+        return df.iloc[:last_valid_index + 1]
+    
     return df
 
-def read_and_prepare_data_from_excel(file_object, progress_container, sheets_to_ignore=['prototipo', 'medie']):
+def read_and_prepare_data_from_excel(file_object, sheet_names, progress_container):
     """
-    Legge tutti i fogli di lavoro di un file Excel e prepara i dati per l'addestramento.
+    Legge e prepara i dati da un file Excel, processando tutti i fogli
+    specificati e unendoli.
     """
-    corpus_list = []
-    
     try:
-        file_object.seek(0)
-        workbook = openpyxl.load_workbook(file_object, read_only=True)
-        sheet_names = workbook.sheetnames
-        workbook.close()
+        corpus_list = []
+        # FILTRO CORRETTO: la logica per ignorare i fogli è ora qui,
+        # senza dipendere da parametri esterni.
+        sheets_to_ignore = ['prototipo', 'medie']
         
-        # Filtra i fogli da ignorare
-        sheets_to_process = [s for s in sheet_names if s.lower().strip() not in [sh.lower().strip() for sh in sheets_to_ignore]]
-        
-        if not sheets_to_process:
-            progress_container("Nessun foglio di lavoro valido trovato da processare.", "warning")
-            return pd.DataFrame()
-            
-        progress_container(f"Trovati {len(sheets_to_process)} fogli da processare: {', '.join(sheets_to_process)}", "info")
-        
-        # Legge il file di nuovo con pandas per processare ogni foglio
-        file_object.seek(0)
-        all_sheets = pd.read_excel(file_object, sheet_name=None)
-        
-        for sheet in sheets_to_process:
+        for sheet in sheet_names:
+            if sheet.lower().strip() in [sh.lower().strip() for sh in sheets_to_ignore]:
+                progress_container(f"Fogli '{sheet}' con 'prototipo' o 'medie' nel nome verranno ignorati.", "warning")
+                continue
+
             try:
-                df = all_sheets[sheet]
-                if df.empty:
-                    progress_container(f"Attenzione: Il foglio '{sheet}' è vuoto. Saltato.", "warning")
+                progress_container(f"Lettura del foglio: {sheet}...", "info")
+                file_object.seek(0)
+                # Utilizza l'argomento 'engine' per gestire diversi formati
+                df = pd.read_excel(file_object, sheet_name=sheet, header=None, engine='openpyxl')
+                
+                # Trova l'intestazione e la colonna 'Giudizio'
+                df, giudizio_col_name = find_header_row_and_columns(df, progress_container)
+                
+                if df is None:
                     continue
                 
-                # Rimuove le colonne completamente vuote
-                df.dropna(axis=1, how='all', inplace=True)
-                if df.empty:
-                    progress_container(f"Attenzione: Il foglio '{sheet}' è vuoto dopo la pulizia. Saltato.", "warning")
-                    continue
+                # Troncamento delle righe basato sulla colonna 'pos'
+                df = trim_dataframe_by_numeric_id_column(df)
 
-                progress_container(f"Elaborazione del foglio '{sheet}'...", "info")
-                
-                # Trova la riga di intestazione e le colonne chiave
-                header_row_index, giudizio_col_name, pos_col_name, alunno_col_name, assenti_col_name, cnt_col_name = find_header_row_and_columns(df)
-                
-                df = df.iloc[header_row_index + 1:].reset_index(drop=True)
-
-                # Tronca il DataFrame in base alla colonna 'pos'
-                if pos_col_name and pos_col_name in df.columns:
-                    df = trim_dataframe_by_numeric_id_column(df, pos_col_name)
-
-                # Tronca le colonne vuote dalla destra
+                # Troncamento delle colonne vuote
                 df = trim_dataframe_by_empty_columns(df)
-                
-                # Rimuovi righe diventate vuote dopo il troncamento
+
+                # Rimuove righe che sono diventate vuote dopo il troncamento
                 df.dropna(how='all', inplace=True)
-                
-                if df.empty:
-                    progress_container(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet}' dopo la pulizia. Saltato.", "warning")
+
+                if giudizio_col_name is None:
+                    progress_container(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet}'. Saltato.", "warning")
                     continue
+
+                # Rimuove le righe con il giudizio vuoto, per assicurare che il corpus sia valido
+                df.dropna(subset=[giudizio_col_name], inplace=True)
                 
-                # Preparazione dei dati per il fine-tuning
+                # Pulisce i dati e crea il prompt
                 data_for_dataset = []
-                # Crea una lista di colonne da escludere, in modo case-insensitive
-                cols_to_exclude = {giudizio_col_name, alunno_col_name, assenti_col_name, cnt_col_name, pos_col_name}
-                
-                # Crea i prompt e i target
                 for _, row in df.iterrows():
-                    input_text_parts = []
-                    # Unisci i dati di tutte le colonne utili nel prompt
-                    for col_name, value in row.items():
-                        if col_name not in cols_to_exclude and pd.notna(value):
-                            input_text_parts.append(f"{col_name}: {value}")
+                    target_text = str(row[giudizio_col_name]).strip()
+                    if pd.isna(target_text) or not target_text:
+                        continue
                     
-                    input_text = " ".join(input_text_parts)
-                    target_text = str(row[giudizio_col_name])
+                    # Costruisce il prompt
+                    prompt_parts = []
+                    for col in df.columns:
+                        if (re.search(r'\b(alunno|assenti|cnt|pos)\b', str(col).lower())
+                            or str(col) == giudizio_col_name):
+                            continue
+                        
+                        cell_value = str(row[col]).strip()
+                        if pd.isna(cell_value) or not cell_value:
+                            continue
+                        
+                        prompt_parts.append(f"{str(col).strip()}: {cell_value}")
                     
-                    if input_text and target_text.strip():
+                    if prompt_parts:
+                        input_text = " ".join(prompt_parts)
                         data_for_dataset.append({
                             'input_text': input_text,
                             'target_text': target_text
@@ -260,49 +220,6 @@ def read_and_prepare_data_from_excel(file_object, progress_container, sheets_to_
         return pd.DataFrame()
 
 
-def read_single_sheet(file_object, sheet_name, progress_container):
-    """
-    Legge e prepara i dati da un singolo foglio di lavoro.
-    """
-    try:
-        file_object.seek(0)
-        df = pd.read_excel(file_object, sheet_name=sheet_name)
-        
-        if df.empty:
-            progress_container(f"Attenzione: Il foglio '{sheet_name}' è vuoto. Impossibile generare giudizi.", "warning")
-            return None
-        
-        df.dropna(axis=1, how='all', inplace=True)
-        if df.empty:
-            progress_container(f"Attenzione: Il foglio '{sheet_name}' è vuoto dopo la pulizia. Impossibile generare giudizi.", "warning")
-            return None
-
-        # Trova la riga di intestazione e le colonne chiave
-        header_row_index, giudizio_col_name, pos_col_name, alunno_col_name, assenti_col_name, cnt_col_name = find_header_row_and_columns(df)
-        
-        df = df.iloc[header_row_index + 1:].reset_index(drop=True)
-        
-        # Tronca il DataFrame in base alla colonna 'pos'
-        if pos_col_name and pos_col_name in df.columns:
-            df = trim_dataframe_by_numeric_id_column(df, pos_col_name)
-
-        # Tronca le colonne vuote dalla destra
-        df = trim_dataframe_by_empty_columns(df)
-        
-        # Rimuovi righe diventate vuote dopo il troncamento
-        df.dropna(how='all', inplace=True)
-
-        if df.empty:
-            progress_container(f"Nessun dato valido trovato nel foglio '{sheet_name}'.", "error")
-            return None
-
-        return df
-
-    except Exception as e:
-        progress_container(f"Errore nella lettura del file: {e}", "error")
-        progress_container(f"Traceback: {traceback.format_exc()}", "error")
-        return None
-
 def get_excel_sheet_names(file_object):
     """
     Restituisce una lista con i nomi di tutti i fogli di lavoro in un file Excel.
@@ -314,6 +231,6 @@ def get_excel_sheet_names(file_object):
         workbook.close()
         return sheet_names
     except Exception as e:
-        st.error(f"Errore nella lettura dei nomi dei fogli: {e}")
+        st.error(f"Errore nel leggere i nomi dei fogli: {e}")
+        st.error(f"Traceback: {traceback.format_exc()}")
         return []
-

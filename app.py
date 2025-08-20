@@ -56,6 +56,8 @@ def perform_training(uploaded_train_file):
         file_content = uploaded_train_file.getvalue()
         sheet_names = er.get_excel_sheet_names(BytesIO(file_content))
         
+        # CHIAMATA CORRETTA: Rimosso l'argomento 'sheets_to_ignore' che non è più necessario
+        # e che causava l'errore. La logica di filtraggio è ora in excel_reader.
         new_data_df = er.read_and_prepare_data_from_excel(BytesIO(file_content), sheet_names, progress_container)
         
         if new_data_df.empty:
@@ -64,7 +66,7 @@ def perform_training(uploaded_train_file):
 
         st.session_state.corpus = cb.build_or_update_corpus(new_data_df, progress_container)
         
-        model, tokenizer = mt.train_fine_tuned_model(st.session_state.corpus, progress_container)
+        model, tokenizer = mt.fine_tune_model(st.session_state.corpus, progress_container)
         
         if model is not None and tokenizer is not None:
             st.session_state.trained_model = model
@@ -95,7 +97,7 @@ def generate_judgments_and_save(uploaded_process_file, selected_sheet):
             progress_container("Errore durante la preparazione del file.", "error")
             return
             
-        completed_df = jg.generate_judgments(df_to_process, st.session_state.trained_model, st.session_state.trained_tokenizer, selected_sheet, progress_container)
+        completed_df = jg.generate_judgments_on_dataframe(df_to_process, selected_sheet, st.session_state.trained_model, st.session_state.trained_tokenizer, giudizio_col_name, progress_container)
         
         st.session_state.process_completed_file = completed_df
         st.session_state.selected_sheet = selected_sheet
