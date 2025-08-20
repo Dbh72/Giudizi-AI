@@ -8,6 +8,19 @@
 # 3. Caricamento del file Excel da completare.
 # 4. Generazione dei giudizi per il file caricato.
 # 5. Download del file Excel completato.
+#
+# Logica dei Troncamenti e Pulizia:
+# - Troncamento righe: basato sulla colonna 'pos'. La lettura si interrompe
+#   quando la sequenza numerica si rompe.
+# - Troncamento colonne: vengono rimosse le colonne vuote consecutive da destra.
+# - Pulizia finale: vengono rimosse le righe con giudizi vuoti.
+#
+# Gestione dei Fogli:
+# - Vengono letti tutti i fogli tranne 'Prototipo' e 'Medie'.
+#
+# Identificazione Colonne:
+# - "Giudizio" e "Descrizione" sono cercate in modo flessibile.
+# - Esclusione di "pos", "Alunno", "assenti", "CNT" dal prompt di input.
 # ==============================================================================
 
 # SEZIONE 0: LIBRERIE NECESSARIE E CONFIGURAZIONE
@@ -30,92 +43,158 @@ from collections import Counter
 from openpyxl import Workbook, load_workbook
 
 # ==============================================================================
-# SEZIONE A: FUNZIONI PER LA GESTIONE DEI DATI EXCEL
-# (dal tuo file excel_reader.py)
+# SEZIONE A: FUNZIONI PER LA GESTIONE DEI DATI EXCEL (basate su excel_reader_v2.py)
 # ==============================================================================
 class ExcelReader:
     """
-    Classe per leggere e preparare dati da file Excel.
+    Classe per leggere e preparare dati da file Excel, implementando la logica di
+    troncamento, pulizia e identificazione flessibile delle colonne.
     """
     def find_header_row_and_columns(self, df):
         """
-        Trova la riga di intestazione e le posizioni delle colonne 'input_text' e 'target_text'.
+        Trova la riga di intestazione e le posizioni delle colonne rilevanti.
+        Cerca in modo flessibile 'descrizione' e 'giudizio' nelle prime 10 righe.
         """
         try:
-            for i in range(min(50, len(df))):
-                row = df.iloc[i]
-                row_str = " ".join(row.astype(str).tolist()).lower()
-                # Use a regular expression to match "descrizione" or "description"
-                if re.search(r'\b(descrizione|description)\b', row_str) and re.search(r'\b(giudizio|judgment)\b', row_str):
+            for i in range(min(10, len(df))):
+                row = df.iloc[i].astype(str).str.lower().tolist()
+                row_str = " ".join(row)
+                
+                if re.search(r'\bdescrizione\b', row_str) and re.search(r'\bgiudizio\b', row_str):
                     header_row_index = i
                     headers = df.iloc[header_row_index].astype(str).tolist()
-                    description_col_name = next((h for h in headers if re.search(r'\b(descrizione|description)\b', h.lower())), None)
-                    judgment_col_name = next((h for h in headers if re.search(r'\b(giudizio|judgment)\b', h.lower())), None)
                     
+                    description_col_name = next((h for h in headers if re.search(r'\bdescrizione\b', str(h).lower())), None)
+                    judgment_col_name = next((h for h in headers if re.search(r'\bgiudizio\b', str(h).lower())), None)
+                    pos_col_name = next((h for h in headers if re.search(r'\bpos\b', str(h).lower())), None)
+
                     if description_col_name and judgment_col_name:
-                        return header_row_index, description_col_name, judgment_col_name
-            return None, None, None
+                        return header_row_index, description_col_name, judgment_col_name, pos_col_name
+            
+            # Fallback a colonna H (indice 7) per il giudizio se la ricerca testuale fallisce
+            header_row_index = 0
+            headers = df.iloc[header_row_index].astype(str).tolist()
+            if len(headers) > 7:
+                 judgment_col_name = headers[7]
+                 return header_row_index, None, judgment_col_name, None # Non abbiamo trovato la descrizione, ma abbiamo un fallback
+            
+            return None, None, None, None
         except Exception as e:
             raise Exception(f"Errore nella ricerca dell'intestazione: {e}")
-
+            
+    def trim_dataframe_by_empty_columns(self, df):
+        """
+        Rimuove le colonne vuote da destra finché non ne trova due consecutive piene.
+        """
+        if df.empty:
+            return df
+        
+        last_col = len(df.columns) - 1
+        empty_count = 0
+        
+        for i in range(last_col, -1, -1):
+            if df.iloc[:, i].isnull().all():
+                empty_count += 1
+            else:
+                empty_count = 0
+            
+            if empty_count >= 2:
+                return df.iloc[:, :i+2]
+        
+        return df
+        
     def read_and_prepare_data_from_excel(self, file_object, sheet_names, progress_container):
         """
         Legge i dati dai fogli specificati, prepara un dataframe con 'input_text' e 'target_text'.
+        Applica la logica di troncamento e pulizia.
         """
-        try:
-            corpus_list = []
+        corpus_list = []
+        excluded_sheets = ["Prototipo", "Medie"]
+        
+        for sheet in sheet_names:
+            if sheet in excluded_sheets:
+                progress_container(f"FOGLIO ESCLUSO: '{sheet}'.", "warning")
+                continue
+
+            progress_container(f"Lettura del foglio: '{sheet}'...", "info")
+            file_object.seek(0)
             
-            for sheet in sheet_names:
-                progress_container(f"Lettura del foglio: '{sheet}'...", "info")
-                file_object.seek(0)
+            try:
+                df = pd.read_excel(file_object, sheet_name=sheet, header=None)
+            except Exception as e:
+                progress_container(f"Impossibile leggere il foglio '{sheet}'. Ignorato. Errore: {e}", "warning")
+                continue
+
+            try:
+                header_row_index, description_col, judgment_col, pos_col = self.find_header_row_and_columns(df)
+            except Exception as e:
+                progress_container(f"Errore nella ricerca dell'intestazione del foglio '{sheet}': {e}", "error")
+                continue
+            
+            if header_row_index is None:
+                progress_container(f"Attenzione: Intestazione non trovata nel foglio '{sheet}'. Saltato.", "warning")
+                continue
+            
+            df.columns = df.iloc[header_row_index]
+            df = df.iloc[header_row_index + 1:].reset_index(drop=True)
+
+            # Tronca le righe basandosi sulla colonna 'pos'
+            if pos_col:
                 try:
-                    df = pd.read_excel(file_object, sheet_name=sheet, header=None)
+                    pos_df = df[pos_col].dropna().astype(str).str.strip().str.lower()
+                    last_valid_pos_idx = -1
+                    for idx, pos_val in enumerate(pos_df):
+                        if pos_val.isdigit():
+                            last_valid_pos_idx = idx
+                        else:
+                            break
+                    df = df.iloc[:last_valid_pos_idx + 1]
+                    progress_container(f"Troncamento righe completato per il foglio '{sheet}'.", "info")
                 except Exception as e:
-                    progress_container(f"Impossibile leggere il foglio '{sheet}'. Ignorato. Errore: {e}", "warning")
-                    continue
-                
-                header_row_index, description_col, judgment_col = self.find_header_row_and_columns(df)
-                
-                if header_row_index is None:
-                    progress_container(f"Attenzione: Intestazione non trovata nel foglio '{sheet}'. Saltato.", "warning")
-                    continue
-                
-                df.columns = df.iloc[header_row_index]
-                df = df.iloc[header_row_index + 1:].reset_index(drop=True)
-                
-                if description_col not in df.columns or judgment_col not in df.columns:
-                    progress_container(f"Attenzione: Colonne 'Descrizione' o 'Giudizio' non trovate nel foglio '{sheet}'. Saltato.", "warning")
-                    continue
-                
-                df_subset = df[[description_col, judgment_col]].rename(columns={description_col: 'input_text', judgment_col: 'target_text'})
-                
-                data_for_dataset = []
-                for _, row in df_subset.iterrows():
-                    input_text = str(row['input_text']).strip()
-                    target_text = str(row['target_text']).strip()
+                    progress_container(f"Errore durante il troncamento righe per la colonna 'pos': {e}", "warning")
+            
+            # Tronca le colonne vuote
+            df = self.trim_dataframe_by_empty_columns(df)
+            progress_container(f"Troncamento colonne completato per il foglio '{sheet}'.", "info")
+
+            if judgment_col not in df.columns:
+                progress_container(f"Attenzione: Colonna 'Giudizio' non trovata nel foglio '{sheet}'. Saltato.", "warning")
+                continue
+
+            data_for_dataset = []
+            
+            # Esclusione delle colonne non pertinenti
+            excluded_cols = ['pos', 'alunno', 'assenti', 'cnt']
+            
+            for _, row in df.iterrows():
+                row_dict = row.to_dict()
+                target_text = str(row_dict.get(judgment_col, '')).strip()
+
+                if pd.notna(target_text) and target_text:
+                    input_parts = []
+                    for key, value in row_dict.items():
+                        if pd.notna(value) and str(key).strip().lower() not in excluded_cols and str(key).strip().lower() != str(judgment_col).strip().lower():
+                            input_parts.append(f"{key}: {value}")
                     
-                    if pd.notna(input_text) and pd.notna(target_text) and input_text and target_text != "nan":
+                    input_text = " ".join(input_parts)
+                    
+                    if input_text:
                         data_for_dataset.append({
                             'input_text': input_text,
                             'target_text': target_text
                         })
 
-                if not data_for_dataset:
-                    progress_container(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet}'. Saltato.", "warning")
-                    continue
-                
-                corpus_list.extend(data_for_dataset)
+            if not data_for_dataset:
+                progress_container(f"Attenzione: Nessun dato valido trovato nel foglio '{sheet}'. Saltato.", "warning")
+                continue
             
-            if not corpus_list:
-                progress_container("Nessun dato valido trovato in tutti i fogli del file.", "error")
-                return pd.DataFrame()
-            
-            return pd.DataFrame(corpus_list)
-
-        except Exception as e:
-            progress_container(f"Errore nella lettura del file: {e}", "error")
-            progress_container(f"Traceback: {traceback.format_exc()}", "error")
+            corpus_list.extend(data_for_dataset)
+        
+        if not corpus_list:
+            progress_container("Nessun dato valido trovato in tutti i fogli del file.", "error")
             return pd.DataFrame()
+        
+        return pd.DataFrame(corpus_list)
 
     def get_excel_sheet_names(self, file_object):
         """
@@ -131,24 +210,8 @@ class ExcelReader:
             progress_container(f"Errore nella lettura dei nomi dei fogli: {e}", "error")
             return []
 
-    def get_file_type(self, file_object):
-        """
-        Determina il tipo di file Excel in base al contenuto.
-        """
-        file_object.seek(0)
-        signature = file_object.read(8)
-        file_object.seek(0)
-        
-        if signature == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
-            return 'xls'
-        elif signature[:4] == b'PK\x03\x04':
-            return 'xlsx'
-        else:
-            return None
-
 # ==============================================================================
-# SEZIONE B: FUNZIONI PER L'ADDESTRAMENTO E LA GENERAZIONE
-# (mock)
+# SEZIONE B: CLASSI MOCK PER ADDESTRAMENTO E GENERAZIONE
 # ==============================================================================
 
 class MockModel:
@@ -161,18 +224,24 @@ class MockTokenizer:
 
 class MockModelTrainer:
     def train_model(self, corpus_df, progress_container):
-        progress_container("MOCK: Addestramento del modello in corso...", "info")
+        progress_container("MOCK: Inizio addestramento del modello...", "info")
+        progress_container(f"MOCK: Dimensione corpus: {len(corpus_df)} righe.", "info")
+        
         for i in range(1, 6):
-            time.sleep(1)
+            time.sleep(0.5)
             progress_container(f"MOCK: Addestramento - Fase {i}/5...", "info")
-        progress_container("MOCK: Addestramento completato.", "success")
+            progress_container(f"MOCK: Loss: {random.uniform(0.1, 0.5):.4f}", "info")
+        
+        progress_container("MOCK: Addestramento completato. Salvataggio del checkpoint...", "success")
+        time.sleep(1)
+        progress_container("MOCK: Checkpoint salvato.", "success")
         return MockModel(), MockTokenizer()
 
     def load_fine_tuned_model(self, progress_container):
         progress_container("MOCK: Caricamento del modello esistente...", "info")
         time.sleep(1)
         # Simula il caso in cui il modello non è sempre disponibile
-        if random.choice([True, False]):
+        if random.choice([True, True, True, False]):
              progress_container("MOCK: Modello esistente caricato.", "success")
              return MockModel(), MockTokenizer()
         else:
@@ -187,29 +256,54 @@ class MockModelTrainer:
 class MockJudgmentGenerator:
     def generate_judgments(self, df, model, tokenizer, sheet_name, progress_container):
         progress_container("MOCK: Generazione dei giudizi in corso...", "info")
-        time.sleep(2)
-        # Simula l'aggiunta di una colonna "Giudizio_Generato"
-        df['Giudizio_Generato'] = df['input_text'].apply(lambda x: f"Giudizio generato per: {x}")
-        return df
+        
+        df_processed = df.copy()
+        generated_judgments = []
+        
+        for _, row in df_processed.iterrows():
+            input_text = row['input_text']
+            
+            # Simulazione della logica di chunking per testi lunghi
+            if len(input_text) > 100:
+                progress_container(f"MOCK: Testo di input troppo lungo. Applico il 'chunking'...", "info")
+                chunk = input_text[:100] + "..."
+                generated_judgment = f"Giudizio generato (chunked): {chunk}"
+            else:
+                generated_judgment = f"Giudizio generato per: {input_text}"
+            
+            generated_judgments.append(generated_judgment)
+        
+        # Aggiungo la nuova colonna al DataFrame
+        df_processed['Giudizio_Generato'] = generated_judgments
+        
+        progress_container("MOCK: Generazione completata!", "success")
+        return df_processed
 
-class MockCorpusBuilder:
+class CorpusBuilder:
     def build_or_update_corpus(self, new_df, progress_container):
-        progress_container("MOCK: Aggiornamento del corpus...", "info")
-        # Simula l'unione di dati
-        corpus = st.session_state.corpus_df
-        updated_corpus = pd.concat([corpus, new_df], ignore_index=True)
-        return updated_corpus.drop_duplicates(subset=['input_text'], keep='first')
+        progress_container("Aggiornamento del corpus...", "info")
+        if st.session_state.corpus_df.empty:
+            st.session_state.corpus_df = new_df
+        else:
+            # Unisce il nuovo DataFrame con quello esistente e rimuove i duplicati
+            st.session_state.corpus_df = pd.concat([st.session_state.corpus_df, new_df], ignore_index=True)
+            st.session_state.corpus_df.drop_duplicates(subset=['input_text'], keep='first', inplace=True)
+        
+        progress_container(f"Corpus aggiornato. Righe totali: {len(st.session_state.corpus_df)}", "success")
+        return st.session_state.corpus_df
 
     def delete_corpus(self, progress_container):
         progress_container("MOCK: Eliminazione del corpus...", "info")
         time.sleep(1)
+        if 'corpus_df' in st.session_state:
+            st.session_state.corpus_df = pd.DataFrame()
         progress_container("MOCK: Corpus eliminato.", "success")
         
 # Istanzio le classi
 er = ExcelReader()
 mt = MockModelTrainer()
 jg = MockJudgmentGenerator()
-cb = MockCorpusBuilder()
+cb = CorpusBuilder()
 
 # Ignoriamo i FutureWarning per mantenere la console pulita.
 warnings.filterwarnings("ignore")
