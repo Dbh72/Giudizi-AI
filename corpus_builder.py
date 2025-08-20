@@ -1,48 +1,92 @@
 # ==============================================================================
 # File: corpus_builder.py
-# Modulo per la gestione del corpus di addestramento.
-# Questo file contiene le funzioni per creare e aggiornare il corpus.
+# Modulo per la creazione e la gestione del corpus di addestramento.
 # ==============================================================================
 
+# SEZIONE 1: LIBRERIE NECESSARIE
+# ==============================================================================
 import pandas as pd
 import os
 import shutil
+import traceback
+from config import CORPUS_FILE
 
-# Definiamo le costanti per il progetto
-OUTPUT_DIR = "./modello_finetunato"
-CORPUS_FILE = "corpus.csv"
+# ==============================================================================
+# SEZIONE 2: FUNZIONI PER LA GESTIONE DEL CORPUS
+# ==============================================================================
 
-def build_corpus(df, corpus_path):
+def build_or_update_corpus(new_df, progress_container):
     """
-    Crea un nuovo corpus o aggiorna un corpus esistente con nuovi dati.
+    Costruisce o aggiorna il corpus di addestramento con un nuovo DataFrame.
     
     Args:
-        df (pd.DataFrame): Il DataFrame contenente i nuovi dati.
-        corpus_path (str): Il percorso in cui salvare il corpus.
+        new_df (pd.DataFrame): Il nuovo DataFrame contenente i dati di addestramento.
+        progress_container (callable): Funzione per inviare messaggi di progresso a Streamlit.
     """
-    # Verifichiamo se il file del corpus esiste già
-    if os.path.exists(corpus_path):
-        # Se esiste, lo carichiamo e ci appendiamo i nuovi dati
-        existing_df = pd.read_csv(corpus_path)
-        updated_df = pd.concat([existing_df, df], ignore_index=True)
-        updated_df.to_csv(corpus_path, index=False)
-    else:
-        # Se non esiste, lo creiamo con i nuovi dati
-        df.to_csv(corpus_path, index=False)
-    
-    print(f"Corpus aggiornato con successo. Dati salvati in: {corpus_path}")
+    try:
+        corpus_df = pd.DataFrame()
+        if os.path.exists(CORPUS_FILE):
+            progress_container("Corpus esistente trovato. Aggiornamento in corso...", "info")
+            corpus_df = pd.read_parquet(CORPUS_FILE)
+            progress_container(f"Corpus caricato. Righe totali prima dell'aggiornamento: {len(corpus_df)}", "info")
+        else:
+            progress_container("Nessun corpus esistente trovato. Verrà creato uno nuovo.", "info")
 
-def load_corpus(corpus_path):
+        progress_container("Lettura del nuovo file di addestramento...", "info")
+
+        if not new_df.empty:
+            progress_container(f"Trovate {len(new_df)} nuove righe da aggiungere.", "info")
+            
+            # Combina i DataFrame
+            updated_corpus = pd.concat([corpus_df, new_df], ignore_index=True)
+            
+            # Rimuovi i duplicati basati su tutte le colonne per evitare dati ridondanti
+            updated_corpus.drop_duplicates(inplace=True)
+            
+            # Salva il corpus aggiornato
+            updated_corpus.to_parquet(CORPUS_FILE)
+            
+            progress_container(f"Corpus aggiornato con successo! Righe totali: {len(updated_corpus)}", "success")
+            return updated_corpus
+        else:
+            progress_container("Nessun dato valido nel nuovo file. Il corpus non è stato aggiornato.", "warning")
+            return corpus_df
+
+    except Exception as e:
+        progress_container(f"Errore durante l'aggiornamento del corpus: {e}", "error")
+        progress_container(f"Traceback: {traceback.format_exc()}", "error")
+        return pd.DataFrame()
+
+def delete_corpus(progress_container):
     """
-    Carica un corpus esistente da un file CSV.
+    Elimina il file del corpus di addestramento.
     
     Args:
-        corpus_path (str): Il percorso del file CSV del corpus.
-        
-    Returns:
-        pd.DataFrame: Il DataFrame del corpus caricato.
+        progress_container (callable): Funzione per inviare messaggi di progresso a Streamlit.
     """
-    if os.path.exists(corpus_path):
-        return pd.read_csv(corpus_path)
+    if os.path.exists(CORPUS_FILE):
+        os.remove(CORPUS_FILE)
+        progress_container("Corpus di addestramento eliminato.", "success")
     else:
-        return pd.DataFrame() # Restituisce un DataFrame vuoto se il file non esiste
+        progress_container("Nessun corpus da eliminare.", "warning")
+
+def load_corpus(progress_container):
+    """
+    Carica il corpus esistente.
+    
+    Args:
+        progress_container (callable): Funzione per inviare messaggi di progresso a Streamlit.
+    """
+    try:
+        if os.path.exists(CORPUS_FILE):
+            progress_container("Caricamento del corpus di addestramento...", "info")
+            corpus_df = pd.read_parquet(CORPUS_FILE)
+            progress_container(f"Corpus caricato. Righe totali: {len(corpus_df)}", "success")
+            return corpus_df
+        else:
+            progress_container("Nessun corpus di addestramento trovato.", "warning")
+            return pd.DataFrame()
+    except Exception as e:
+        progress_container(f"Errore nel caricamento del corpus: {e}", "error")
+        progress_container(f"Traceback: {traceback.format_exc()}", "error")
+        return pd.DataFrame()
